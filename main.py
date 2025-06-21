@@ -771,7 +771,8 @@ access_token = st.sidebar.text_input("Upstox API Access Token", type="password",
 
 if not access_token:
     st.sidebar.warning("Please enter your Upstox API Access Token to proceed.")
-    st.info("""
+    # Changed st.info to st.markdown
+    st.markdown("""
         <div class="info-box">
             <p><strong>To get started:</strong></p>
             <ol>
@@ -793,4 +794,3 @@ else:
 
     with trade_journal_tab:
         render_trade_journal_tab(access_token)
-
