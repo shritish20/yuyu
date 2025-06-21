@@ -117,9 +117,11 @@ client = get_http_client()
 # --- Functions to call Backend API Endpoints (now synchronous) ---
 
 def fetch_metrics(access_token: str):
-    """Fetches core financial metrics from the backend."""
+    """Fetches core financial metrics from the backend.
+    Updated to call /option-seller-dashboard based on API documentation.
+    """
     try:
-        response = client.get("/metrics", params={"access_token": access_token})
+        response = client.get("/option-seller-dashboard", params={"access_token": access_token})
         response.raise_for_status()
         return response.json()
     except httpx.HTTPStatusError as e:
@@ -132,7 +134,9 @@ def fetch_metrics(access_token: str):
 def fetch_strategy_suggestion(access_token: str):
     """Fetches strategy suggestions from the backend."""
     try:
-        response = client.get("/strategy_suggestion", params={"access_token": access_token})
+        # Assuming strategy suggestion is still at /strategy_suggestion based on previous context
+        # If this also returns 404, you might need to check your full API docs for it
+        response = client.get("/suggest/strategy", params={"access_token": access_token})
         response.raise_for_status()
         return response.json()
     except httpx.HTTPStatusError as e:
@@ -145,7 +149,7 @@ def fetch_strategy_suggestion(access_token: str):
 def create_single_leg_order(access_token: str, order_data: dict):
     """Places a single-leg order via the backend."""
     try:
-        response = client.post("/create_order", params={"access_token": access_token}, json=order_data)
+        response = client.post("/place/order", params={"access_token": access_token}, json=order_data)
         response.raise_for_status()
         return response.json()
     except httpx.HTTPStatusError as e:
@@ -158,7 +162,7 @@ def create_single_leg_order(access_token: str, order_data: dict):
 def create_multi_leg_order(access_token: str, order_data: dict):
     """Places a multi-leg order via the backend."""
     try:
-        response = client.post("/multi_leg_order", params={"access_token": access_token}, json=order_data)
+        response = client.post("/place/multileg", params={"access_token": access_token}, json=order_data)
         response.raise_for_status()
         return response.json()
     except httpx.HTTPStatusError as e:
@@ -171,7 +175,7 @@ def create_multi_leg_order(access_token: str, order_data: dict):
 def create_single_gtt_order(access_token: str, order_data: dict):
     """Places a single-leg GTT order via the backend."""
     try:
-        response = client.post("/create_gtt_order", params={"access_token": access_token}, json=order_data)
+        response = client.post("/place/gtt", params={"access_token": access_token}, json=order_data)
         response.raise_for_status()
         return response.json()
     except httpx.HTTPStatusError as e:
@@ -184,7 +188,7 @@ def create_single_gtt_order(access_token: str, order_data: dict):
 def create_multi_leg_gtt_order(access_token: str, order_data: dict):
     """Places a multi-leg GTT order via the backend."""
     try:
-        response = client.post("/multi_leg_gtt_order", params={"access_token": access_token}, json=order_data)
+        response = client.post("/place/gtt-multileg", params={"access_token": access_token}, json=order_data)
         response.raise_for_status()
         return response.json()
     except httpx.HTTPStatusError as e:
@@ -197,7 +201,7 @@ def create_multi_leg_gtt_order(access_token: str, order_data: dict):
 def log_trade(access_token: str, trade_data: dict):
     """Logs a trade to the backend."""
     try:
-        response = client.post("/trades", params={"access_token": access_token}, json=trade_data)
+        response = client.post("/log/trade", params={"access_token": access_token}, json=trade_data)
         response.raise_for_status()
         return response.json()
     except httpx.HTTPStatusError as e:
@@ -210,7 +214,7 @@ def log_trade(access_token: str, trade_data: dict):
 def fetch_journal_entries(access_token: str):
     """Fetches trade journal entries from the backend."""
     try:
-        response = client.get("/journal", params={"access_token": access_token})
+        response = client.get("/fetch/journals", params={"access_token": access_token})
         response.raise_for_status()
         return response.json()
     except httpx.HTTPStatusError as e:
