@@ -134,8 +134,7 @@ def fetch_metrics(access_token: str):
 def fetch_strategy_suggestion(access_token: str):
     """Fetches strategy suggestions from the backend."""
     try:
-        # Assuming strategy suggestion is still at /strategy_suggestion based on previous context
-        # If this also returns 404, you might need to check your full API docs for it
+        # Assuming strategy suggestion is still at /suggest/strategy based on previous context
         response = client.get("/suggest/strategy", params={"access_token": access_token})
         response.raise_for_status()
         return response.json()
@@ -224,6 +223,13 @@ def fetch_journal_entries(access_token: str):
         st.markdown(f"<div class='error-box'>Network error fetching journal entries: {e}</div>", unsafe_allow_html=True)
         return None
 
+# Helper function for safe numerical display
+def get_numeric_display(value, format_string=".2f", default_val="N/A"):
+    """Safely formats a value as a number, or returns default_val if not numeric."""
+    if isinstance(value, (int, float)):
+        return f"{value:{format_string}}"
+    return default_val
+
 # --- UI Components ---
 
 def render_dashboard_tab(access_token):
@@ -280,14 +286,14 @@ def render_dashboard_tab(access_token):
             st.markdown(f"""
                 <div class="metric-card">
                     <p class="metric-card-title">Nifty Spot</p>
-                    <p class="metric-card-value">{metrics_data.get('nifty_spot', 'N/A'):.2f}</p>
+                    <p class="metric-card-value">{get_numeric_display(metrics_data.get('nifty_spot'), '.2f')}</p>
                 </div>
             """, unsafe_allow_html=True)
         with col2:
             st.markdown(f"""
                 <div class="metric-card">
                     <p class="metric-card-title">India VIX</p>
-                    <p class="metric-card-value">{metrics_data.get('india_vix', 'N/A'):.2f}</p>
+                    <p class="metric-card-value">{get_numeric_display(metrics_data.get('india_vix'), '.2f')}</p>
                 </div>
             """, unsafe_allow_html=True)
         with col3:
@@ -313,28 +319,28 @@ def render_dashboard_tab(access_token):
             st.markdown(f"""
                 <div class="metric-card">
                     <p class="metric-card-title">Straddle Price</p>
-                    <p class="metric-card-value">{metrics_data.get('straddle_price', 'N/A'):.2f}</p>
+                    <p class="metric-card-value">{get_numeric_display(metrics_data.get('straddle_price'), '.2f')}</p>
                 </div>
             """, unsafe_allow_html=True)
         with metrics_cols_1[1]:
             st.markdown(f"""
                 <div class="metric-card">
                     <p class="metric-card-title">Avg IV</p>
-                    <p class="metric-card-value">{metrics_data.get('avg_iv', 'N/A'):.2f}%</p>
+                    <p class="metric-card-value">{get_numeric_display(metrics_data.get('avg_iv'), '.2f')}%</p>
                 </div>
             """, unsafe_allow_html=True)
         with metrics_cols_1[2]:
             st.markdown(f"""
                 <div class="metric-card">
                     <p class="metric-card-title">Implied Volatility Percentile (IVP)</p>
-                    <p class="metric-card-value">{metrics_data.get('ivp', 'N/A'):.2f}%</p>
+                    <p class="metric-card-value">{get_numeric_display(metrics_data.get('ivp'), '.2f')}%</p>
                 </div>
             """, unsafe_allow_html=True)
         with metrics_cols_1[3]:
             st.markdown(f"""
                 <div class="metric-card">
                     <p class="metric-card-title">IV-RV Spread</p>
-                    <p class="metric-card-value">{metrics_data.get('iv_rv_spread', 'N/A'):.2f}</p>
+                    <p class="metric-card-value">{get_numeric_display(metrics_data.get('iv_rv_spread'), '.2f')}</p>
                 </div>
             """, unsafe_allow_html=True)
 
@@ -342,14 +348,14 @@ def render_dashboard_tab(access_token):
             st.markdown(f"""
                 <div class="metric-card">
                     <p class="metric-card-title">Historical Volatility (7-Day)</p>
-                    <p class="metric-card-value">{metrics_data.get('hv_7_day', 'N/A'):.2f}%</p>
+                    <p class="metric-card-value">{get_numeric_display(metrics_data.get('hv_7_day'), '.2f')}%</p>
                 </div>
             """, unsafe_allow_html=True)
         with metrics_cols_2[1]:
             st.markdown(f"""
                 <div class="metric-card">
                     <p class="metric-card-title">GARCH Volatility (7-Day)</p>
-                    <p class="metric-card-value">{metrics_data.get('garch_7_day', 'N/A'):.2f}%</p>
+                    <p class="metric-card-value">{get_numeric_display(metrics_data.get('garch_7_day'), '.2f')}%</p>
                 </div>
             """, unsafe_allow_html=True)
         with metrics_cols_2[2]:
@@ -363,7 +369,7 @@ def render_dashboard_tab(access_token):
             st.markdown(f"""
                 <div class="metric-card">
                     <p class="metric-card-title">PCR</p>
-                    <p class="metric-card-value">{metrics_data.get('pcr', 'N/A'):.2f}</p>
+                    <p class="metric-card-value">{get_numeric_display(metrics_data.get('pcr'), '.2f')}</p>
                 </div>
             """, unsafe_allow_html=True)
 
@@ -373,35 +379,35 @@ def render_dashboard_tab(access_token):
             st.markdown(f"""
                 <div class="metric-card">
                     <p class="metric-card-title">Theta</p>
-                    <p class="metric-card-value">{metrics_data.get('theta', 'N/A'):.2f}</p>
+                    <p class="metric-card-value">{get_numeric_display(metrics_data.get('theta'), '.2f')}</p>
                 </div>
             """, unsafe_allow_html=True)
         with greeks_cols[1]:
             st.markdown(f"""
                 <div class="metric-card">
                     <p class="metric-card-title">Vega</p>
-                    <p class="metric-card-value">{metrics_data.get('vega', 'N/A'):.2f}</p>
+                    <p class="metric-card-value">{get_numeric_display(metrics_data.get('vega'), '.2f')}</p>
                 </div>
             """, unsafe_allow_html=True)
         with greeks_cols[2]:
             st.markdown(f"""
                 <div class="metric-card">
                     <p class="metric-card-title">Delta</p>
-                    <p class="metric-card-value">{metrics_data.get('delta', 'N/A'):.4f}</p>
+                    <p class="metric-card-value">{get_numeric_display(metrics_data.get('delta'), '.4f')}</p>
                 </div>
             """, unsafe_allow_html=True)
         with greeks_cols[3]:
             st.markdown(f"""
                 <div class="metric-card">
                     <p class="metric-card-title">Gamma</p>
-                    <p class="metric-card-value">{metrics_data.get('gamma', 'N/A'):.6f}</p>
+                    <p class="metric-card-value">{get_numeric_display(metrics_data.get('gamma'), '.6f')}</p>
                 </div>
             """, unsafe_allow_html=True)
         with greeks_cols[4]:
             st.markdown(f"""
                 <div class="metric-card">
                     <p class="metric-card-title">POP</p>
-                    <p class="metric-card-value">{metrics_data.get('pop', 'N/A'):.2f}%</p>
+                    <p class="metric-card-value">{get_numeric_display(metrics_data.get('pop'), '.2f')}%</p>
                 </div>
             """, unsafe_allow_html=True)
     else:
@@ -410,10 +416,14 @@ def render_dashboard_tab(access_token):
 
     if strategy_data: # This is the line that caused the error, now `strategy_data` is guaranteed to be bound
         st.markdown('<p class="subheader">Volatility Regime & Strategy Suggestion</p>', unsafe_allow_html=True)
-        st.markdown(f"**Current Volatility Regime:** <span style='font-size: 1.2em; font-weight: bold; color: {'#FF4B4B' if 'High Vol' in strategy_data.get('regime_label', '') else '#4CAF50' if 'Low Vol' not in strategy_data.get('regime_label', '') else '#FFD700'};'>{strategy_data.get('regime_label', 'N/A')}</span>", unsafe_allow_html=True)
+        # Safely get regime_label for display
+        regime_label = strategy_data.get('regime_label', 'N/A')
+        regime_color = '#FF4B4B' if 'High Vol' in regime_label else ('#4CAF50' if 'Low Vol' not in regime_label else '#FFD700')
+        st.markdown(f"**Current Volatility Regime:** <span style='font-size: 1.2em; font-weight: bold; color: {regime_color};'>{regime_label}</span>", unsafe_allow_html=True)
+        
         st.write(f"**Regime Summary:** {strategy_data.get('regime_summary', 'N/A')}")
         st.write(f"**Regime Implications:** {strategy_data.get('regime_implications', 'N/A')}")
-        st.write(f"**Regime Score:** {strategy_data.get('regime_score', 'N/A'):.2f}")
+        st.write(f"**Regime Score:** {get_numeric_display(strategy_data.get('regime_score'), '.2f')}")
 
         st.subheader("Suggested Strategies")
         if strategy_data.get('suggested_strategies'):
