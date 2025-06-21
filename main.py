@@ -703,15 +703,15 @@ access_token = st.sidebar.text_input("Upstox API Access Token", type="password",
 if not access_token:
     st.sidebar.warning("Please enter your Upstox API Access Token to proceed.")
     st.markdown("""
-        <div class="info-box">
-            <p><strong>To get started:</strong></p>
-            <ol>
-                <li>Enter your Upstox API Access Token in the sidebar.</li>
-                <li>The application will then enable tabs for analysis and trading.</li>
-            </ol>
-            <p>Your Access Token is crucial for connecting to the backend to retrieve live market data and interact with trading functionalities.</p>
-        </div>
-    """, unsafe_allow_html=True)
+    <div style="background-color: #e6f7ff; border-left: 5px solid #2196F3; padding: 10px; border-radius: 5px;">
+        <p><strong>To get started:</strong></p>
+        <ol>
+            <li>Enter your Upstox API Access Token in the sidebar.</li>
+            <li>The application will then enable tabs for analysis and trading.</li>
+        </ol>
+        <p>Your Access Token is crucial for connecting to the backend to retrieve live market data and interact with trading functionalities.</p>
+    </div>
+""", unsafe_allow_html=True)
 else:
     # Initialize session state for tabs if not present
     if 'current_tab' not in st.session_state:
