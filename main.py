@@ -702,7 +702,7 @@ access_token = st.sidebar.text_input("Upstox API Access Token", type="password",
 
 if not access_token:
     st.sidebar.warning("Please enter your Upstox API Access Token to proceed.")
-    st.info("""
+    st.markdown("""
         <div class="info-box">
             <p><strong>To get started:</strong></p>
             <ol>
