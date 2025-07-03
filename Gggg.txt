@@ -1,0 +1,1021 @@
+import os
+import logging
+import pandas as pd
+import numpy as np
+import httpx
+import pickle
+from io import BytesIO
+from datetime import datetime, timedelta, date
+from arch import arch_model
+from scipy.stats import linregress
+from fastapi import FastAPI, Depends, HTTPException, Query, Request, WebSocket, WebSocketDisconnect, Body, APIRouter
+from fastapi.responses import JSONResponse
+from pydantic import BaseModel, Field, ValidationError
+from typing import List, Optional, Dict, Any, Set
+import websockets
+
+# --- ENVIRONMENT VARIABLES ---
+# These environment variables must be set in your Render environment for the backend to function correctly.
+# Example: SUPABASE_URL="https://your-project-id.supabase.co"
+# Example: SUPABASE_KEY="your-supabase-anon-key"
+# Example: UPSTOX_API_KEY="your_upstox_api_key"
+# Example: UPSTOX_API_SECRET="your_upstox_api_secret"
+# Example: UPSTOX_REDIRECT_URI="http://localhost:8000/auth/callback" # Or your Render callback URL
+
+SUPABASE_URL = os.getenv("SUPABASE_URL")
+SUPABASE_KEY = os.getenv("SUPABASE_KEY")
+XG_BOOST_MODEL_URL = os.getenv("XG_BOOST_MODEL_URL", "https://raw.githubusercontent.com/shritish20/VolGuard-Pro/main/xgb_vol_model_v2.pkl")
+NIFTY_HIST_URL = os.getenv("NIFTY_HIST_URL", "https://raw.githubusercontent.com/shritish20/VolGuard/main/nifty_50.csv")
+IVP_HIST_URL = os.getenv("IVP_HIST_URL", "https://raw.githubusercontent.com/shritish20/VolGuard/main/ivp.csv")
+UPCOMING_EVENTS_URL = os.getenv("UPCOMING_EVENTS_URL", "https://raw.githubusercontent.com/shritish20/VolGuard/main/upcoming_events.csv")
+UPSTOX_API_KEY = os.getenv("UPSTOX_API_KEY")
+UPSTOX_API_SECRET = os.getenv("UPSTOX_API_SECRET")
+UPSTOX_REDIRECT_URI = os.getenv("UPSTOX_REDIRECT_URI")
+
+# Ensure critical environment variables are set
+if not SUPABASE_URL or not SUPABASE_KEY:
+    raise ValueError("Supabase URL and Key must be set as environment variables.")
+if not UPSTOX_API_KEY or not UPSTOX_API_SECRET or not UPSTOX_REDIRECT_URI:
+    raise ValueError("Upstox API Key, API Secret, and Redirect URI must be set as environment variables.")
+
+# --- LOGGING SETUP ---
+logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(name)s - %(levelname)s - %(message)s')
+logger = logging.getLogger(__name__)
+
+# --- SUPABASE CLIENT ---
+SUPABASE_HEADERS = {
+    "apikey": SUPABASE_KEY,
+    "Content-Type": "application/json",
+    "Prefer": "return=representation"
+}
+
+# In-memory store for access tokens (for demonstration/testing purposes,
+# in a production environment, this should be a secure, persistent store like Redis or a database)
+# You will need to implement a proper OAuth2 flow to obtain and manage access tokens.
+# This global variable will hold the access token after a successful login.
+ACCESS_TOKEN_STORE: Dict[str, Any] = {"access_token": None, "expiry_time": None}
+
+async def get_current_access_token() -> Optional[str]:
+    """Retrieves the current valid access token from the store."""
+    if ACCESS_TOKEN_STORE["access_token"] and ACCESS_TOKEN_STORE["expiry_time"] and \
+       datetime.now() < ACCESS_TOKEN_STORE["expiry_time"]:
+        return ACCESS_TOKEN_STORE["access_token"]
+    return None
+
+async def refresh_access_token(code: str) -> bool:
+    """
+    Exchanges authorization code for an access token and refreshes it.
+    This is a simplified example; a full OAuth2 implementation would handle refresh tokens.
+    """
+    token_url = "https://api-v2.upstox.com/v2/login/authorization/token"
+    payload = {
+        "code": code,
+        "client_id": UPSTOX_API_KEY,
+        "client_secret": UPSTOX_API_SECRET,
+        "redirect_uri": UPSTOX_REDIRECT_URI,
+        "grant_type": "authorization_code"
+    }
+    headers = {
+        "accept": "application/json",
+        "Content-Type": "application/x-www-form-urlencoded"
+    }
+    try:
+        async with httpx.AsyncClient() as client:
+            response = await client.post(token_url, data=payload, headers=headers)
+            response.raise_for_status()
+            token_data = response.json()
+            ACCESS_TOKEN_STORE["access_token"] = token_data.get("access_token")
+            # Set expiry time based on expires_in (seconds)
+            expires_in = token_data.get("expires_in", 3600)  # Default to 1 hour if not provided
+            ACCESS_TOKEN_STORE["expiry_time"] = datetime.now() + timedelta(seconds=expires_in - 300) # 5 min buffer
+            logger.info("Access token refreshed successfully.")
+            return True
+    except httpx.HTTPStatusError as e:
+        logger.error(f"HTTP error refreshing token: {e.response.status_code} - {e.response.text}")
+    except httpx.RequestError as e:
+        logger.error(f"Network error refreshing token: {e}")
+    return False
+
+# Dependency to get access token for protected routes
+async def get_upstox_access_token_dep() -> str:
+    token = await get_current_access_token()
+    if not token:
+        raise HTTPException(status_code=401, detail="Upstox access token not available or expired. Please authorize.")
+    return token
+
+async def log_trade_to_supabase(data: dict):
+    data["timestamp_entry"] = datetime.utcnow().isoformat() + "Z"
+    data["timestamp_exit"] = datetime.utcnow().isoformat() + "Z"
+    data["status"] = "closed"
+    try:
+        async with httpx.AsyncClient() as client:
+            response = await client.post(f"{SUPABASE_URL}/rest/v1/trade_logs", json=data, headers=SUPABASE_HEADERS)
+            response.raise_for_status()
+            logger.info(f"Trade logged to Supabase: {response.json()}")
+            return response.status_code, response.json()
+    except httpx.HTTPStatusError as e:
+        logger.error(f"HTTP error logging trade to Supabase: {e.response.status_code} - {e.response.text}")
+        return e.response.status_code, {"error": e.response.text}
+    except httpx.RequestError as e:
+        logger.error(f"Network error logging trade to Supabase: {e}")
+        return 500, {"error": str(e)}
+
+async def add_journal_to_supabase(data: dict):
+    """Adds a journal entry to Supabase."""
+    data["timestamp"] = datetime.utcnow().isoformat() + "Z"
+    try:
+        async with httpx.AsyncClient() as client:
+            response = await client.post(f"{SUPABASE_URL}/rest/v1/journals", json=data, headers={**SUPABASE_HEADERS, "Authorization": f"Bearer {SUPABASE_KEY}"})
+            response.raise_for_status()
+            logger.info(f"Journal entry added to Supabase: {response.json()}")
+            return response.status_code, response.json()
+    except httpx.HTTPStatusError as e:
+        logger.error(f"HTTP error adding journal to Supabase: {e.response.status_code} - {e.response.text}")
+        return e.response.status_code, {"error": e.response.text}
+    except httpx.RequestError as e:
+        logger.error(f"Network error adding journal to Supabase: {e}")
+        return 500, {"error": str(e)}
+
+# --- FastAPI Setup ---
+app = FastAPI(title="VoluGuard API", description="Comprehensive API for Volatility Analysis, Strategy Suggestion, Risk Management, and Trade Logging.")
+
+# --- FastAPI Models ---
+class UpstoxOrderRequest(BaseModel):
+    transaction_type: str
+    instrument_key: str
+    product: str
+    price: Optional[float] = 0.0
+    quantity: int
+
+class GTTOrderRequest(BaseModel):
+    transaction_type: str
+    instrument_key: str
+    product: str
+    price: float
+    trigger_price: float
+    quantity: int
+    time_in_force: str = "GTT"
+    trigger_type: str = "single"
+    order_type: str = "limit"
+
+class MultiLegOrder(BaseModel):
+    legs: List[UpstoxOrderRequest]
+
+class MultiLegGTTRequest(BaseModel):
+    legs: List[GTTOrderRequest]
+
+class TradeRequest(BaseModel):
+    strategy: str
+    instrument_token: str
+    entry_price: float
+    quantity: float
+    realized_pnl: float
+    unrealized_pnl: float
+    regime_score: Optional[float] = None
+    notes: Optional[str] = ""
+    capital_used: Optional[float] = None
+    potential_loss: Optional[float] = None
+    sl_hit: Optional[bool] = False
+    vega: Optional[float] = None
+    timestamp_entry: Optional[str] = None
+    timestamp_exit: Optional[str] = None
+    status: Optional[str] = "closed"
+
+class JournalRequest(BaseModel):
+    title: str
+    content: str
+    mood: str
+    tags: Optional[str] = ""
+
+class StrategyRequest(BaseModel):
+    strategy: str
+    lots: int = Field(1, ge=1)
+
+class RiskEvaluationRequest(BaseModel):
+    active_trades: List[TradeRequest]
+
+class PlaceOrderInput(BaseModel):
+    index: str
+    strike: Union[int, List[int]]
+    expiry: str
+    option_type: str
+    quantity: int
+    transaction_type: str
+    order_type: str
+    price: Optional[float] = None
+    gtt: Optional[bool] = False
+
+class ModifyOrderInput(BaseModel):
+    order_id: str
+    quantity: Optional[int] = None
+    price: Optional[float] = None
+    order_type: Optional[str] = None
+    trigger_price: Optional[float] = None # For GTT or SL orders
+
+# --- Helper Functions for Database (Supabase) ---
+async def get_all_trades(status: Optional[str] = None):
+    """Fetches all logged trade entries from Supabase, with optional status filter."""
+    try:
+        async with httpx.AsyncClient() as client:
+            url = f"{SUPABASE_URL}/rest/v1/trade_logs"
+            headers = {**SUPABASE_HEADERS, "Authorization": f"Bearer {SUPABASE_KEY}"}
+            if status:
+                url += f"?status=eq.{status}"
+            response = await client.get(url, headers=headers)
+            response.raise_for_status()
+            logger.info("Successfully fetched trades from Supabase.")
+            return response.json()
+    except httpx.HTTPStatusError as e:
+        logger.error(f"HTTP error fetching trades: {e.response.status_code} - {e.response.text}")
+        raise HTTPException(status_code=e.response.status_code, detail=f"Error fetching trades: {e.response.text}")
+    except httpx.RequestError as e:
+        logger.error(f"Network error fetching trades: {e}")
+        raise HTTPException(status_code=500, detail=f"Network error fetching trades: {str(e)}")
+
+async def get_all_journals():
+    """Fetches all logged journal entries from Supabase."""
+    try:
+        async with httpx.AsyncClient() as client:
+            response = await client.get(f"{SUPABASE_URL}/rest/v1/journals", headers={**SUPABASE_HEADERS, "Authorization": f"Bearer {SUPABASE_KEY}"})
+            response.raise_for_status()
+            logger.info("Successfully fetched journals from Supabase.")
+            return response.json()
+    except httpx.HTTPStatusError as e:
+        logger.error(f"HTTP error fetching journals: {e.response.status_code} - {e.response.text}")
+        raise HTTPException(status_code=e.response.status_code, detail=f"Error fetching journals: {e.response.text}")
+    except httpx.RequestError as e:
+        logger.error(f"Network error fetching journals: {e}")
+        raise HTTPException(status_code=500, detail=f"Network error fetching journals: {str(e)}")
+
+# --- VolGuard Core Logic Placeholders ---
+# These functions represent the existing VolGuard functionality.
+# The actual implementation of these functions would be copied directly from the original main.txt
+# and integrated here. For this exercise, they are placeholders.
+
+def get_financial_year(date_obj: datetime) -> str:
+    """
+    Returns capped Indian financial year in 'YYYY-YYYY' format.
+    Caps to '2025-2026' if system date leads to '2025-2026'.
+    [span_0](start_span)
+    """
+    if date_obj.month >= 4:[span_0](end_span)
+        [span_1](start_span)fy_start = date_obj.year[span_1](end_span)
+    else:
+        [span_2](start_span)fy_start = date_obj.year - 1[span_2](end_span)
+
+    [span_3](start_span)fy_end = fy_start + 1[span_3](end_span)
+
+    # CAP to current allowed maximum year (Upstox limit)
+    [span_4](start_span)if fy_start >= 2025:[span_4](end_span)
+        [span_5](start_span)return "2025-2026"[span_5](end_span)
+
+    [span_6](start_span)return f"{fy_start}-{fy_end}"[span_6](end_span)
+
+
+async def load_xgboost_model():
+    """Placeholder for loading the XGBoost model."""
+    logger.info("Loading XGBoost model...")
+    # In a real scenario, this would fetch from XG_BOOST_MODEL_URL and load the pickle file.
+    # For now, it's just a log message.
+    return {"model_loaded": True}
+
+async def fetch_historical_data(url: str):
+    """Placeholder for fetching historical data."""
+    logger.info(f"Fetching historical data from {url}...")
+    # In a real scenario, this would fetch from the provided URL.
+    return pd.DataFrame() # Return an empty DataFrame for placeholder
+
+async def calculate_volatility(config: Dict[str, Any], avg_iv: float):
+    """Placeholder for volatility calculation (GARCH(1,1), IV-RV spread, IV Percentile, Realized Vol)."""
+    logger.info(f"Calculating volatility with avg_iv: {avg_iv}...")
+    # This would involve using arch_model, linregress and the fetched historical data.
+    hv_7_day = avg_iv * 0.8 # Dummy value
+    garch_7_day = avg_iv * 1.1 # Dummy value
+    iv_rv_spread = avg_iv * 0.1 # Dummy value
+    return hv_7_day, garch_7_day, iv_rv_spread
+
+async def get_market_metrics_data():
+    """Placeholder for market metrics data."""
+    logger.info("Fetching market metrics data...")
+    # This would include PCR, Max Pain, Days to expiry calculation based on market data.
+    return {
+        "pcr": 1.0,
+        "max_pain": 19500,
+        "days_to_expiry": 7
+    }
+
+async def calculate_regime_score():
+    """Placeholder for multi-factor regime scoring engine."""
+    logger.info("Calculating regime score...")
+    return 0.75 # Dummy score
+
+async def evaluate_risk(active_trades: List[TradeRequest]):
+    """Placeholder for position-level, portfolio-level checks, behavioral rules."""
+    logger.info(f"Evaluating risk for {len(active_trades)} trades...")
+    # This would involve detailed risk assessment logic.
+    return {"overall_risk": "moderate", "exceeds_limit": False}
+
+async def suggest_strategy(ivp: float, theta_environment: str):
+    """Placeholder for strategy suggestion based on IVP, expiry, theta environment."""
+    logger.info(f"Suggesting strategy for IVP: {ivp}, theta: {theta_environment}...")
+    # This would contain the logic for Iron Fly, Condor, Jade Lizard suggestions.
+    return ["Iron Condor", "Iron Fly"]
+
+# --- CONFIGURATION & UPSTOX API SETUP ---
+def get_upstox_headers(access_token: str) -> Dict[str, str]:
+    """
+    Returns standard headers for Upstox API calls, including Authorization.
+    [span_7](start_span)
+    """
+    return {
+        "accept": "application/json",[span_7](end_span)
+        "Api-Version": "2.0", # Defaulting to 2.0 for general calls, will override for V3 where needed
+        [span_8](start_span)"Authorization": f"Bearer {access_token}"[span_8](end_span)
+    }
+
+async def get_config(access_token: str) -> Dict[str, Any]:
+    """
+    Retrieves dynamic configuration, including Upstox API headers and general settings.
+    Expiry and instrument details will be fetched dynamically via specific endpoints.
+    [span_9](start_span)
+    """
+    upstox_headers = get_upstox_headers(access_token)[span_9](end_span)
+    config = {
+        [span_10](start_span)"base_url": "https://api.upstox.com/v2",[span_10](end_span)
+        [span_11](start_span)"v3_url": "https://api-v2.upstox.com/v3", # Corrected V3 URL as per openapi.txt[span_11](end_span)
+        [span_12](start_span)"headers": upstox_headers,[span_12](end_span)
+        [span_13](start_span)"nifty_url": NIFTY_HIST_URL,[span_13](end_span)
+        [span_14](start_span)"ivp_url": IVP_HIST_URL,[span_14](end_span)
+        [span_15](start_span)"event_url": UPCOMING_EVENTS_URL,[span_15](end_span)
+        [span_16](start_span)"total_funds": 2000000, # Default total funds, can be made dynamic[span_16](end_span)
+        "risk_config": {
+            [span_17](start_span)"Iron Fly": {"capital_pct": 0.30, "risk_per_trade_pct": 0.01},[span_17](end_span)
+            [span_18](start_span)"Iron Condor": {"capital_pct": 0.25, "risk_per_trade_pct": 0.015},[span_18](end_span)
+            [span_19](start_span)"Jade Lizard": {"capital_pct": 0.20, "risk_per_trade_pct": 0.01},[span_19](end_span)
+            [span_20](start_span)"Straddle": {"capital_pct": 0.15, "risk_per_trade_pct": 0.02},[span_20](end_span)
+            [span_21](start_span)"Calendar Spread": {"capital_pct": 0.10, "risk_per_trade_pct": 0.01},[span_21](end_span)
+            [span_22](start_span)"Bull Put Spread": {"capital_pct": 0.15, "risk_per_trade_pct": 0.01},[span_22](end_span)
+            [span_23](start_span)"Wide Strangle": {"capital_pct": 0.10, "risk_per_trade_pct": 0.015},[span_23](end_span)
+            [span_24](start_span)"ATM Strangle": {"capital_pct": 0.10, "risk_per_trade_pct": 0.015}[span_24](end_span)
+        },
+        [span_25](start_span)"daily_risk_limit_pct": 0.02,[span_25](end_span)
+        [span_26](start_span)"weekly_risk_limit_pct": 0.03,[span_26](end_span)
+        [span_27](start_span)"lot_size": 50 # Nifty lot size as of recent changes (was 75) - adjust if needed[span_27](end_span)
+    }
+    try:
+        async with httpx.AsyncClient() as client:
+            # Fetch funds and margin
+            [span_28](start_span)funds_resp = await client.get(f"{config['base_url']}/user/get-funds-and-margin", headers=config['headers'])[span_28](end_span)
+            funds_resp.raise_for_status()
+            [span_29](start_span)funds = funds_resp.json()["data"]["equity"][span_29](end_span)
+            [span_30](start_span)config["available_margin"] = float(funds["available_margin"] or 0)[span_30](end_span)
+    except httpx.HTTPStatusError as e:
+        logger.error(f"HTTP error fetching funds: {e.response.status_code} - {e.response.text}")
+        raise HTTPException(status_code=e.response.status_code, detail=f"Error fetching funds: {e.response.text}")
+    except httpx.RequestError as e:
+        logger.error(f"Network error fetching funds: {e}")
+        raise HTTPException(status_code=500, detail=f"Network error fetching funds: {str(e)}")
+    return config
+
+# --- Upstox API Integration ---
+
+# Helper to map index to instrument key prefix
+INDEX_TO_INSTRUMENT_PREFIX = {
+    "nifty": "NSE_INDEX",
+    "sensex": "BSE_INDEX"
+}
+
+INDEX_TO_CONTRACT_SYMBOL = {
+    "nifty": "NIFTY",
+    "sensex": "SENSEX"
+}
+
+async def get_expiries_from_upstox(index: str, access_token: str) -> List[str]:
+    """
+    Fetches all available expiry dates for a given index from Upstox.
+    Uses /market-quote/quotes endpoint to get instrument keys for Nifty and Sensex.
+    Then uses /option/contract to get all option contracts and extract expiries.
+    """
+    instrument_key = f"{INDEX_TO_INSTRUMENT_PREFIX[index.lower()]}|{INDEX_TO_CONTRACT_SYMBOL[index.lower()]} 50" if index.lower() == "nifty" else f"{INDEX_TO_INSTRUMENT_PREFIX[index.lower()]}|{INDEX_TO_CONTRACT_SYMBOL[index.lower()]}"
+    
+    url = "https://api-v2.upstox.com/v2/option/contract" # Use v2 endpoint for option contracts
+    headers = get_upstox_headers(access_token)
+    params = {"instrument_key": instrument_key}
+
+    try:
+        async with httpx.AsyncClient() as client:
+            response = await client.get(url, headers=headers, params=params)
+            response.raise_for_status()
+            data = response.json()["data"]
+            all_expiries = sorted(list(set(item["expiry"] for item in data)))
+            return all_expiries
+    except httpx.HTTPStatusError as e:
+        logger.error(f"HTTP error fetching expiries for {index}: {e.response.status_code} - {e.response.text}")
+        raise HTTPException(status_code=e.response.status_code, detail=f"Error fetching expiries: {e.response.text}")
+    except httpx.RequestError as e:
+        logger.error(f"Network error fetching expiries for {index}: {e}")
+        raise HTTPException(status_code=500, detail=f"Network error fetching expiries: {str(e)}")
+
+async def get_option_chain_from_upstox(index: str, expiry: str, access_token: str) -> Dict[str, Any]:
+    """
+    Fetches the full option chain for a given index and expiry from Upstox.
+    Groups by strike and option type (CE/PE).
+    """
+    instrument_key_prefix = INDEX_TO_INSTRUMENT_PREFIX[index.lower()]
+    contract_symbol = INDEX_TO_CONTRACT_SYMBOL[index.lower()]
+
+    # Upstox's /option/contract endpoint provides all option contracts, which can be filtered by expiry
+    url = "https://api-v2.upstox.com/v2/option/contract"
+    headers = get_upstox_headers(access_token)
+    
+    # Fetch all contracts for the given index to find relevant tokens
+    params = {"instrument_key": f"{instrument_key_prefix}|{contract_symbol} 50" if index.lower() == "nifty" else f"{instrument_key_prefix}|{contract_symbol}"}
+
+    try:
+        async with httpx.AsyncClient() as client:
+            response = await client.get(url, headers=headers, params=params)
+            response.raise_for_status()
+            all_contracts = response.json()["data"]
+
+            option_chain = {}
+            for contract in all_contracts:
+                if contract["expiry"] == expiry:
+                    strike_price = int(contract["strike_price"])
+                    option_type = contract["option_type"]
+                    instrument_token = contract["instrument_key"]
+
+                    if strike_price not in option_chain:
+                        option_chain[strike_price] = {"CE": None, "PE": None}
+                    
+                    option_chain[strike_price][option_type] = {
+                        "instrument_token": instrument_token,
+                        "strike_price": strike_price,
+                        "option_type": option_type,
+                        "expiry": expiry
+                    }
+            return option_chain
+    except httpx.HTTPStatusError as e:
+        logger.error(f"HTTP error fetching option chain for {index} expiry {expiry}: {e.response.status_code} - {e.response.text}")
+        raise HTTPException(status_code=e.response.status_code, detail=f"Error fetching option chain: {e.response.text}")
+    except httpx.RequestError as e:
+        logger.error(f"Network error fetching option chain for {index} expiry {expiry}: {e}")
+        raise HTTPException(status_code=500, detail=f"Network error fetching option chain: {str(e)}")
+
+async def get_instrument_token(index: str, strike: int, expiry: str, option_type: str, access_token: str) -> Optional[str]:
+    """
+    Resolves instrument token for a given option contract.
+    """
+    option_chain = await get_option_chain_from_upstox(index, expiry, access_token)
+    if strike in option_chain and option_chain[strike][option_type]:
+        return option_chain[strike][option_type]["instrument_token"]
+    return None
+
+async def get_spot_price_from_upstox(instrument_key: str, access_token: str) -> Optional[float]:
+    """
+    Gets the real-time Last Traded Price (LTP) for a given instrument key.
+    """
+    url = "https://api-v2.upstox.com/v2/market-quote/ltp"
+    headers = get_upstox_headers(access_token)
+    params = {"instrument_key": instrument_key}
+
+    try:
+        async with httpx.AsyncClient() as client:
+            response = await client.get(url, headers=headers, params=params)
+            response.raise_for_status()
+            data = response.json()["data"]
+            if instrument_key in data and data[instrument_key]:
+                return data[instrument_key].get("ltp")
+            return None
+    except httpx.HTTPStatusError as e:
+        logger.error(f"HTTP error fetching LTP for {instrument_key}: {e.response.status_code} - {e.response.text}")
+        raise HTTPException(status_code=e.response.status_code, detail=f"Error fetching LTP: {e.response.text}")
+    except httpx.RequestError as e:
+        logger.error(f"Network error fetching LTP for {instrument_key}: {e}")
+        raise HTTPException(status_code=500, detail=f"Network error fetching LTP: {str(e)}")
+
+async def get_option_greeks_from_upstox(instrument_key: str, access_token: str) -> Optional[Dict[str, Any]]:
+    """
+    Gets option Greeks (IV, delta, theta, vega, gamma) for a given instrument key.
+    """
+    url = "https://api-v2.upstox.com/v2/market-quote/option-greek"
+    headers = get_upstox_headers(access_token)
+    params = {"instrument_key": instrument_key}
+
+    try:
+        async with httpx.AsyncClient() as client:
+            response = await client.get(url, headers=headers, params=params)
+            response.raise_for_status()
+            data = response.json()["data"]
+            if instrument_key in data and data[instrument_key]:
+                return data[instrument_key]
+            return None
+    except httpx.HTTPStatusError as e:
+        logger.error(f"HTTP error fetching option Greeks for {instrument_key}: {e.response.status_code} - {e.response.text}")
+        raise HTTPException(status_code=e.response.status_code, detail=f"Error fetching option Greeks: {e.response.text}")
+    except httpx.RequestError as e:
+        logger.error(f"Network error fetching option Greeks for {instrument_key}: {e}")
+        raise HTTPException(status_code=500, detail=f"Network error fetching option Greeks: {str(e)}")
+
+async def get_market_timings_from_upstox(exchange: Optional[str] = None, product_type: Optional[str] = None, access_token: str) -> Dict[str, Any]:
+    """
+    Gets market timings and holiday information from Upstox.
+    """
+    url = "https://api-v2.upstox.com/v2/market/timings"
+    headers = get_upstox_headers(access_token)
+    params = {}
+    if exchange:
+        params["exchange"] = exchange
+    if product_type:
+        params["product_type"] = product_type
+
+    try:
+        async with httpx.AsyncClient() as client:
+            response = await client.get(url, headers=headers, params=params)
+            response.raise_for_status()
+            return response.json()["data"]
+    except httpx.HTTPStatusError as e:
+        logger.error(f"HTTP error fetching market timings: {e.response.status_code} - {e.response.text}")
+        raise HTTPException(status_code=e.response.status_code, detail=f"Error fetching market timings: {e.response.text}")
+    except httpx.RequestError as e:
+        logger.error(f"Network error fetching market timings: {e}")
+        raise HTTPException(status_code=500, detail=f"Network error fetching market timings: {str(e)}")
+
+# --- FastAPI Endpoints ---
+
+@app.get("/auth/login")
+async def login():
+    """
+    Initiates the Upstox OAuth2 login process.
+    Redirects to Upstox authorization URL.
+    """
+    auth_url = "https://api-v2.upstox.com/v2/login/authorization/dialog"
+    params = {
+        "response_type": "code",
+        "client_id": UPSTOX_API_KEY,
+        "redirect_uri": UPSTOX_REDIRECT_URI
+    }
+    # Build the URL manually to ensure it's correct
+    query_string = "&".join([f"{k}={v}" for k, v in params.items()])
+    full_auth_url = f"{auth_url}?{query_string}"
+    return JSONResponse(content={"authorization_url": full_auth_url})
+
+@app.get("/auth/callback")
+async def auth_callback(code: str = Query(..., description="Authorization code from Upstox")):
+    """
+    Callback endpoint for Upstox OAuth2. Exchanges the authorization code for an access token.
+    """
+    if await refresh_access_token(code):
+        return {"message": "Authentication successful! Access token obtained."}
+    raise HTTPException(status_code=400, detail="Failed to obtain access token.")
+
+
+@app.post("/log-trade")
+async def log_trade(trade: TradeRequest):
+    """Logs a trade entry to Supabase."""
+    status_code, response_data = await log_trade_to_supabase(trade.dict())
+    if status_code in [200, 201]:
+        return {"message": "Trade logged successfully", "data": response_data}
+    raise HTTPException(status_code=status_code, detail=response_data.get("error", "Failed to log trade."))
+
+@app.get("/get-trades")
+async def get_trades(status: Optional[str] = Query(None)):
+    """Fetches all logged trade entries from Supabase, with optional status filter."""
+    trades = await get_all_trades(status)
+    return {"trades": trades}
+
+@app.post("/add-journal")
+async def add_journal(journal: JournalRequest):
+    """Adds a journal entry to Supabase."""
+    status_code, response_data = await add_journal_to_supabase(journal.dict())
+    if status_code in [200, 201]:
+        return {"message": "Journal entry added successfully", "data": response_data}
+    raise HTTPException(status_code=status_code, detail=response_data.get("error", "Failed to add journal entry."))
+
+@app.get("/get-journals")
+async def get_journals():
+    """Fetches all logged journal entries from Supabase."""
+    journals = await get_all_journals()
+    return {"journals": journals}
+
+@app.get("/expiries")
+async def get_expiries_endpoint(index: str = Query(..., description="Index name, e.g., NIFTY or SENSEX"),
+                                access_token: str = Depends(get_upstox_access_token_dep)):
+    """
+    Retrieves current, next weekly, and next monthly expiry dates for Nifty or Sensex.
+    Automatically detects holidays or special expiry shifts.
+    """
+    if index.upper() not in ["NIFTY", "SENSEX"]:
+        raise HTTPException(status_code=400, detail="Invalid index. Must be NIFTY or SENSEX.")
+
+    all_expiries = await get_expiries_from_upstox(index, access_token)
+    
+    today = date.today()
+    current_expiry = None
+    next_weekly_expiry = None
+    next_monthly_expiry = None
+
+    # Filter out past expiries and convert to datetime objects for easier comparison
+    future_expiries_dt = sorted([datetime.strptime(e, "%Y-%m-%d").date() for e in all_expiries if datetime.strptime(e, "%Y-%m-%d").date() >= today])
+
+    if not future_expiries_dt:
+        raise HTTPException(status_code=404, detail="No upcoming expiries found.")
+
+    # Current Expiry: The first expiry that is today or in the future
+    current_expiry = future_expiries_dt[0].strftime("%Y-%m-%d")
+
+    # Determine next weekly and next monthly expiry
+    weekly_expiries = [e for e in future_expiries_dt if e.weekday() == 3] # Thursday (0=Monday, 3=Thursday)
+    monthly_expiries = [e for e in future_expiries_dt if e.day >= 25 and e.month != (e + timedelta(days=7)).month] # Rough heuristic for last Thursday of month
+
+    # Find next weekly expiry
+    for exp in weekly_expiries:
+        if exp > today:
+            next_weekly_expiry = exp.strftime("%Y-%m-%d")
+            break
+    
+    # If no future weekly expiry found, or if current expiry is weekly and same as next, find the next one
+    if not next_weekly_expiry or (current_expiry == next_weekly_expiry and len(weekly_expiries) > weekly_expiries.index(datetime.strptime(current_expiry, "%Y-%m-%d").date()) + 1):
+        try:
+            current_idx = weekly_expiries.index(datetime.strptime(current_expiry, "%Y-%m-%d").date())
+            if current_idx + 1 < len(weekly_expiries):
+                next_weekly_expiry = weekly_expiries[current_idx + 1].strftime("%Y-%m-%d")
+        except ValueError:
+            # current_expiry might not be a weekly expiry itself, find first weekly after current
+            for exp in weekly_expiries:
+                if exp > datetime.strptime(current_expiry, "%Y-%m-%d").date():
+                    next_weekly_expiry = exp.strftime("%Y-%m-%d")
+                    break
+
+    # Find next monthly expiry
+    for exp in monthly_expiries:
+        if exp > today and (not next_monthly_expiry or exp < datetime.strptime(next_monthly_expiry, "%Y-%m-%d").date() if next_monthly_expiry else True):
+            next_monthly_expiry = exp.strftime("%Y-%m-%d")
+
+    # If the found monthly expiry is before or same as current expiry, look for the next one
+    if next_monthly_expiry and datetime.strptime(next_monthly_expiry, "%Y-%m-%d").date() <= datetime.strptime(current_expiry, "%Y-%m-%d").date():
+        for exp in monthly_expiries:
+            if exp > datetime.strptime(current_expiry, "%Y-%m-%d").date():
+                next_monthly_expiry = exp.strftime("%Y-%m-%d")
+                break
+        else:
+            next_monthly_expiry = None # No further monthly expiries found
+
+    return {
+        "current_expiry": current_expiry,
+        "next_weekly_expiry": next_weekly_expiry,
+        "next_monthly_expiry": next_monthly_expiry
+    }
+
+
+@app.get("/option-chain")
+async def get_option_chain_endpoint(
+    index: str = Query(..., description="Index name, e.g., NIFTY or SENSEX"),
+    expiry: str = Query(..., description="Expiry date in YYYY-MM-DD format"),
+    access_token: str = Depends(get_upstox_access_token_dep)
+):
+    """
+    Retrieves the full option chain for a specified index and expiry.
+    """
+    if index.upper() not in ["NIFTY", "SENSEX"]:
+        raise HTTPException(status_code=400, detail="Invalid index. Must be NIFTY or SENSEX.")
+    
+    try:
+        datetime.strptime(expiry, "%Y-%m-%d")
+    except ValueError:
+        raise HTTPException(status_code=400, detail="Invalid expiry date format. Use YYYY-MM-DD.")
+
+    option_chain_data = await get_option_chain_from_upstox(index, expiry, access_token)
+    if not option_chain_data:
+        raise HTTPException(status_code=404, detail=f"No option chain found for {index} with expiry {expiry}.")
+    return option_chain_data
+
+@app.post("/place-order")
+async def place_order_endpoint(
+    order_input: PlaceOrderInput,
+    access_token: str = Depends(get_upstox_access_token_dep)
+):
+    """
+    Places a regular or GTT order on Upstox. Handles dynamic instrument token fetching
+    and multi-leg trades.
+    """
+    
+    headers = get_upstox_headers(access_token)
+    # The API-Version for v3 order placement is 3.0
+    headers["Api-Version"] = "3.0" 
+
+    # Handle single strike vs. multi-strike for spreads (multi-leg trades)
+    strikes = order_input.strike if isinstance(order_input.strike, list) else [order_input.strike]
+    
+    orders_to_place = []
+    for strike in strikes:
+        instrument_token = await get_instrument_token(
+            order_input.index, strike, order_input.expiry, order_input.option_type, access_token
+        )
+        if not instrument_token:
+            raise HTTPException(status_code=404, detail=f"Could not resolve instrument token for {order_input.index} {strike} {order_input.option_type} on {order_input.expiry}")
+
+        base_order_payload = {
+            "quantity": order_input.quantity,
+            "instrument_token": instrument_token,
+            "product": "D",  # Assuming 'D' for Delivery/Derivatives for options, adjust if needed
+            "transaction_type": order_input.transaction_type,
+            "order_type": order_input.order_type,
+        }
+
+        if order_input.order_type == "LIMIT" and order_input.price is not None:
+            base_order_payload["price"] = order_input.price
+        elif order_input.order_type == "LIMIT" and order_input.price is None:
+            raise HTTPException(status_code=400, detail="Price is required for LIMIT orders.")
+        
+        # For multi-leg trades, we'll place them as individual orders for now.
+        # Upstox doesn't seem to have a single multi-leg order API in v3 for options directly
+        # but rather a /v2/order/multi/place for equities.
+        # This implementation will place multiple single orders if multiple strikes are provided.
+        orders_to_place.append(base_order_payload)
+
+    results = []
+    order_type_str = "REGULAR"
+
+    for order_payload in orders_to_place:
+        if order_input.gtt:
+            gtt_url = "https://api-v2.upstox.com/v3/order/gtt/place"
+            gtt_order_payload = {
+                "instrument_token": order_payload["instrument_token"],
+                "quantity": order_payload["quantity"],
+                "product": order_payload["product"],
+                "transaction_type": order_payload["transaction_type"],
+                "order_type": order_payload["order_type"],
+                "price": order_payload.get("price", 0.0), # GTT limit orders require price
+                "rules": [
+                    {
+                        "strategy": "ENTRY",
+                        "trigger_type": "ABOVE" if order_payload["transaction_type"] == "BUY" else "BELOW", # Simplified trigger logic
+                        "trigger_price": order_payload.get("price", 0.0) # Using price as trigger for simplicity, can be separate
+                    }
+                ],
+                "type": "SINGLE" # Assuming single GTT for now, can extend for OCO/OTO if Upstox supports
+            }
+            if order_input.order_type == "MARKET":
+                 raise HTTPException(status_code=400, detail="GTT orders cannot be MARKET orders.")
+            
+            order_type_str = "GTT"
+            try:
+                async with httpx.AsyncClient() as client:
+                    response = await client.post(gtt_url, json=gtt_order_payload, headers=headers)
+                    response.raise_for_status()
+                    results.append(response.json())
+            except httpx.HTTPStatusError as e:
+                logger.error(f"HTTP error placing GTT order: {e.response.status_code} - {e.response.text}")
+                raise HTTPException(status_code=e.response.status_code, detail=f"Error placing GTT order: {e.response.text}")
+            except httpx.RequestError as e:
+                logger.error(f"Network error placing GTT order: {e}")
+                raise HTTPException(status_code=500, detail=f"Network error placing GTT order: {str(e)}")
+        else:
+            regular_order_url = "https://api-v2.upstox.com/v3/order/place"
+            try:
+                async with httpx.AsyncClient() as client:
+                    response = await client.post(regular_order_url, json=order_payload, headers=headers)
+                    response.raise_for_status()
+                    results.append(response.json())
+            except httpx.HTTPStatusError as e:
+                logger.error(f"HTTP error placing regular order: {e.response.status_code} - {e.response.text}")
+                raise HTTPException(status_code=e.response.status_code, detail=f"Error placing regular order: {e.response.text}")
+            except httpx.RequestError as e:
+                logger.error(f"Network error placing regular order: {e}")
+                raise HTTPException(status_code=500, detail=f"Network error placing regular order: {str(e)}")
+
+    # For simplicity, return the first successful order ID or a combined status
+    if results:
+        first_result = results[0]
+        return {
+            "status": "success",
+            "order_id": first_result.get("data", {}).get("order_id", "N/A"),
+            "type": order_type_str
+        }
+    return {"status": "error", "message": "No orders were placed."}
+
+@app.get("/ltp")
+async def get_ltp_endpoint(instrument_key: str = Query(..., description="Instrument key (e.g., NSE_FO|NIFTY|2025-07-31|19500CE)"),
+                           access_token: str = Depends(get_upstox_access_token_dep)):
+    """
+    Gets the real-time Last Traded Price (LTP) for a given instrument.
+    """
+    ltp = await get_spot_price_from_upstox(instrument_key, access_token)
+    if ltp is None:
+        raise HTTPException(status_code=404, detail=f"LTP not found for instrument key: {instrument_key}")
+    return {"instrument_key": instrument_key, "ltp": ltp}
+
+@app.get("/option-greeks")
+async def get_option_greeks_endpoint(instrument_key: str = Query(..., description="Instrument key (e.g., NSE_FO|NIFTY|2025-07-31|19500CE)"),
+                                     access_token: str = Depends(get_upstox_access_token_dep)):
+    """
+    Gets option Greeks (IV, delta, theta, vega, gamma) for a given instrument key.
+    """
+    greeks = await get_option_greeks_from_upstox(instrument_key, access_token)
+    if greeks is None:
+        raise HTTPException(status_code=404, detail=f"Option Greeks not found for instrument key: {instrument_key}")
+    return greeks
+
+@app.get("/market-timings")
+async def get_market_timings_endpoint(exchange: Optional[str] = Query(None, description="Exchange, e.g., NSE"),
+                                     product_type: Optional[str] = Query(None, description="Product type, e.g., EQUITY, FUTURE, OPTION"),
+                                     access_token: str = Depends(get_upstox_access_token_dep)):
+    """
+    Gets market timings and holiday information.
+    """
+    timings = await get_market_timings_from_upstox(exchange, product_type, access_token)
+    if not timings:
+        raise HTTPException(status_code=404, detail="Market timings not found.")
+    return timings
+
+@app.get("/order-status")
+async def get_order_status_endpoint(
+    order_id: str = Query(..., description="The ID of the order to check status for."),
+    access_token: str = Depends(get_upstox_access_token_dep)
+):
+    """
+    Fetches the current status of a specific order from Upstox.
+    """
+    url = "https://api-v2.upstox.com/v2/order/details" # As per openapi.txt get_order_details in v2
+    headers = get_upstox_headers(access_token)
+    params = {"order_id": order_id} # The API expects order_id as a query parameter
+
+    try:
+        async with httpx.AsyncClient() as client:
+            response = await client.get(url, headers=headers, params=params)
+            response.raise_for_status()
+            order_details = response.json()["data"]
+            if not order_details:
+                raise HTTPException(status_code=404, detail=f"Order with ID {order_id} not found.")
+            return order_details
+    except httpx.HTTPStatusError as e:
+        logger.error(f"HTTP error fetching order status for {order_id}: {e.response.status_code} - {e.response.text}")
+        raise HTTPException(status_code=e.response.status_code, detail=f"Error fetching order status: {e.response.text}")
+    except httpx.RequestError as e:
+        logger.error(f"Network error fetching order status for {order_id}: {e}")
+        raise HTTPException(status_code=500, detail=f"Network error fetching order status: {str(e)}")
+
+@app.put("/modify-order")
+async def modify_order_endpoint(
+    modify_input: ModifyOrderInput,
+    access_token: str = Depends(get_upstox_access_token_dep)
+):
+    """
+    Modifies an existing order (regular or GTT) on Upstox.
+    """
+    headers = get_upstox_headers(access_token)
+    
+    # Check if it's a GTT order based on the modify_input or if we need to make an additional call
+    # For now, assuming if trigger_price is provided, it's a GTT modify.
+    # In a real app, you might need to fetch order details first to confirm if it's GTT.
+    if modify_input.trigger_price is not None:
+        # Modify GTT order
+        url = "https://api-v2.upstox.com/v3/order/gtt/modify" # As per openapi.txt
+        headers["Api-Version"] = "3.0"
+        payload = {
+            "gtt_order_id": modify_input.order_id,
+            "quantity": modify_input.quantity,
+            "rules": [ # GTT modify requires rules, simplifying for this example
+                {
+                    "strategy": "ENTRY",
+                    "trigger_type": "ABOVE", # This might need to be dynamic
+                    "trigger_price": modify_input.trigger_price
+                }
+            ],
+            "type": "SINGLE"
+        }
+        if modify_input.price is not None:
+            payload["price"] = modify_input.price
+
+    else:
+        # Modify regular order
+        url = "https://api-v2.upstox.com/v3/order/modify" # As per openapi.txt
+        headers["Api-Version"] = "3.0"
+        payload = {
+            "order_id": modify_input.order_id,
+            "quantity": modify_input.quantity,
+            "price": modify_input.price,
+            "order_type": modify_input.order_type
+        }
+        # Clean payload from None values
+        payload = {k: v for k, v in payload.items() if v is not None}
+
+    try:
+        async with httpx.AsyncClient() as client:
+            response = await client.put(url, json=payload, headers=headers)
+            response.raise_for_status()
+            return response.json()
+    except httpx.HTTPStatusError as e:
+        logger.error(f"HTTP error modifying order {modify_input.order_id}: {e.response.status_code} - {e.response.text}")
+        raise HTTPException(status_code=e.response.status_code, detail=f"Error modifying order: {e.response.text}")
+    except httpx.RequestError as e:
+        logger.error(f"Network error modifying order {modify_input.order_id}: {e}")
+        raise HTTPException(status_code=500, detail=f"Network error modifying order: {str(e)}")
+
+# --- VolGuard Specific Endpoints (Placeholders, assuming logic from original main.txt) ---
+
+@app.get("/volguard/dashboard")
+async def get_volguard_dashboard(access_token: str = Depends(get_upstox_access_token_dep)):
+    """
+    Endpoint to provide a comprehensive VolGuard dashboard with combined metrics.
+    This will integrate data from Upstox (spot price, Greeks) with VolGuard's internal calculations.
+    """
+    config = await get_config(access_token)
+    # Placeholder for fetching a relevant instrument key for dashboard display, e.g., Nifty spot
+    nifty_spot_key = "NSE_INDEX|Nifty 50" 
+    spot_price = await get_spot_price_from_upstox(nifty_spot_key, access_token)
+
+    # Placeholder for getting India VIX (would need a specific instrument key for VIX if available via Upstox)
+    india_vix = 18.5 # Dummy VIX
+
+    # Placeholder for seller metrics (e.g., ATM strike, straddle price, avg IV, theta, vega, delta, gamma, POP, PCR, Max Pain)
+    # These would typically come from more complex calculations involving option chain data
+    seller_metrics = {
+        "atm_strike": 19500,
+        "straddle_price": 250.0,
+        "avg_iv": 15.0,
+        "theta": -2000.0,
+        "vega": 1500.0,
+        "delta": 0.5,
+        "gamma": 0.05,
+        "pop": 0.60, # Probability of Profit
+    }
+
+    # Placeholder for market metrics data (e.g., PCR, Max Pain, Days to Expiry)
+    market_metrics_data = await get_market_metrics_data()
+
+    # Calculate volatility metrics (HV, GARCH, IV-RV Spread)
+    hv_7_day, garch_7_day, iv_rv_spread = await calculate_volatility(config, seller_metrics["avg_iv"])
+
+    logger.info("Option Seller Dashboard data compiled successfully.")
+    return {
+        "spot_price": round(spot_price, 2) if spot_price else None,
+        "india_vix": round(india_vix, 2),
+        "nifty_spot": round(spot_price, 2) if spot_price else None, # Assuming Nifty spot is the same as spot_price for now
+        "atm_strike": seller_metrics["atm_strike"],
+        "straddle_price": round(seller_metrics["straddle_price"], 2),
+        "avg_iv": round(seller_metrics["avg_iv"], 2),
+        "theta": round(seller_metrics["theta"], 2),
+        "vega": round(seller_metrics["vega"], 2),
+        "delta": round(seller_metrics["delta"], 4),
+        "gamma": round(seller_metrics["gamma"], 6),
+        "pop": round(seller_metrics["pop"], 2),
+        "pcr": market_metrics_data["pcr"],
+        "max_pain": market_metrics_data["max_pain"],
+        "days_to_expiry": market_metrics_data["days_to_expiry"],
+        "hv_7_day": round(hv_7_day, 2),
+        "garch_7_day": round(garch_7_day, 2),
+        "iv_rv_spread": round(iv_rv_spread, 2)
+    }
+
+@app.post("/volguard/strategy-suggestion")
+async def get_strategy_suggestion(req: StrategyRequest):
+    """
+    Provides strategy suggestions based on market conditions.
+    This will leverage the existing VolGuard strategy logic.
+    """
+    # Placeholder for actual IVP and theta environment calculation from live data
+    mock_ivp = 0.70
+    mock_theta_environment = "high"
+    suggested_strategies = await suggest_strategy(mock_ivp, mock_theta_environment)
+    return {"suggested_strategies": suggested_strategies, "request": req.dict()}
+
+@app.get("/volguard/regime-classification")
+async def get_regime_classification():
+    """
+    Returns the multi-factor regime classification score.
+    """
+    regime_score = await calculate_regime_score()
+    return {"regime_score": regime_score}
+
+@app.post("/volguard/risk-evaluation")
+async def perform_risk_evaluation(req: RiskEvaluationRequest):
+    """
+    Performs position-level and portfolio-level risk evaluation.
+    """
+    risk_assessment = await evaluate_risk(req.active_trades)
+    return {"risk_assessment": risk_assessment}
+
+@app.get("/volguard/financial-year")
+async def get_current_financial_year():
+    """
+    Returns the current Indian financial year.
+    """
+    current_date = datetime.now()
+    fy = get_financial_year(current_date)
+    return {"financial_year": fy}
+
+# WebSocket endpoint for real-time data if needed (example structure)
+@app.websocket("/ws")
+async def websocket_endpoint(websocket: WebSocket):
+    await websocket.accept()
+    try:
+        while True:
+            # You can send real-time market data or updates here
+            # For example, fetch LTP every few seconds and send it
+            # await websocket.send_json({"message": "Real-time data update"})
+            await websockets.sleep(1) # Sleep to avoid busy-waiting
+    except WebSocketDisconnect:
+        logger.info("Client disconnected from websocket.")
+    except Exception as e:
+        logger.error(f"WebSocket error: {e}")
