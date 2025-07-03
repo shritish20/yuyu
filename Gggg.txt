@@ -11,9 +11,7 @@ from scipy.stats import linregress
 from fastapi import FastAPI, Depends, HTTPException, Query, Request, WebSocket, WebSocketDisconnect, Body, APIRouter
 from fastapi.responses import JSONResponse
 from pydantic import BaseModel, Field, ValidationError
-from typing import List, Optional, Dict, Any, Set, Union # Import Union
-
-import websockets
+from typing import List, Optional, Dict, Any, Set, Union
 
 # --- ENVIRONMENT VARIABLES ---
 # These environment variables must be set in your Render environment for the backend to function correctly.
@@ -52,8 +50,6 @@ SUPABASE_HEADERS = {
 
 # In-memory store for access tokens (for demonstration/testing purposes,
 # in a production environment, this should be a secure, persistent store like Redis or a database)
-# You will need to implement a proper OAuth2 flow to obtain and manage access tokens.
-# This global variable will hold the access token after a successful login.
 ACCESS_TOKEN_STORE: Dict[str, Any] = {"access_token": None, "expiry_time": None}
 
 async def get_current_access_token() -> Optional[str]:
@@ -86,9 +82,9 @@ async def refresh_access_token(code: str) -> bool:
             response.raise_for_status()
             token_data = response.json()
             ACCESS_TOKEN_STORE["access_token"] = token_data.get("access_token")
-            # Set expiry time based on expires_in (seconds)
-            expires_in = token_data.get("expires_in", 3600)  # Default to 1 hour if not provided
-            ACCESS_TOKEN_STORE["expiry_time"] = datetime.now() + timedelta(seconds=expires_in - 300) # 5 min buffer
+            # Set expiry time based on expires_in (seconds), with a 5-minute buffer
+            expires_in = token_data.get("expires_in", 3600)
+            ACCESS_TOKEN_STORE["expiry_time"] = datetime.now() + timedelta(seconds=expires_in - 300)
             logger.info("Access token refreshed successfully.")
             return True
     except httpx.HTTPStatusError as e:
@@ -104,11 +100,11 @@ async def get_upstox_access_token_dep() -> str:
         raise HTTPException(status_code=401, detail="Upstox access token not available or expired. Please authorize.")
     return token
 
-async def log_trade_to_supabase(data: dict):
-    # Ensure timestamp_entry and timestamp_exit are present, handling optional fields
+async def log_trade_to_supabase(data: Dict[str, Any]):
+    """Logs a trade entry to Supabase, including fill status."""
     data["timestamp_entry"] = data.get("timestamp_entry", datetime.utcnow().isoformat() + "Z")
     data["timestamp_exit"] = data.get("timestamp_exit", datetime.utcnow().isoformat() + "Z")
-    data["status"] = data.get("status", "closed")
+    data["status"] = data.get("status", "closed") # Default to 'closed' if not specified
     
     try:
         async with httpx.AsyncClient() as client:
@@ -143,24 +139,6 @@ async def add_journal_to_supabase(data: dict):
 app = FastAPI(title="VoluGuard API", description="Comprehensive API for Volatility Analysis, Strategy Suggestion, Risk Management, and Trade Logging.")
 
 # --- FastAPI Models ---
-class UpstoxOrderRequest(BaseModel):
-    transaction_type: str
-    instrument_key: str
-    product: str
-    price: Optional[float] = 0.0
-    quantity: int
-
-class GTTOrderRequest(BaseModel):
-    transaction_type: str
-    instrument_key: str
-    product: str
-    price: float
-    trigger_price: float
-    quantity: int
-    time_in_force: str = "GTT"
-    trigger_type: str = "single"
-    order_type: str = "limit"
-
 class TradeRequest(BaseModel):
     strategy: str
     instrument_token: str
@@ -176,7 +154,7 @@ class TradeRequest(BaseModel):
     vega: Optional[float] = None
     timestamp_entry: Optional[str] = None
     timestamp_exit: Optional[str] = None
-    status: Optional[str] = "closed"
+    status: Optional[str] = "closed" # Added status for clarity in logging
 
 class JournalRequest(BaseModel):
     title: str
@@ -215,24 +193,32 @@ class ModifyOrderInput(BaseModel):
 
 class OrderStatusResponse(BaseModel):
     exchange_order_id: str
-    tradingsymbol: str
+    tradingsymbol: Optional[str] = None
     instrument_token: str
     quantity: int
     price: float
     status: str
-    # Add other relevant fields from Upstox order details
     average_price: Optional[float] = None
     transaction_type: Optional[str] = None
     product: Optional[str] = None
     order_type: Optional[str] = None
     validity: Optional[str] = None
-    # ... more fields as per Upstox API response
+    # Add other relevant fields from Upstox order details as needed for full tracking
 
 class ModifyOrderResponse(BaseModel):
     status: str
     message: Optional[str] = None
     order_id: Optional[str] = None
-    # Add other relevant fields from Upstox modify order response
+
+class VolatilityPredictionInput(BaseModel):
+    # These features are placeholders.
+    # The actual features required for xgb_vol_model_v2.pkl
+    # would need to be determined from the model's training data.
+    # Examples might include: historical volatility, IV, VIX,
+    # days to expiry, current market conditions, etc.
+    feature1: float
+    feature2: float
+    feature3: float
 
 # --- Helper Functions for Database (Supabase) ---
 async def get_all_trades(status: Optional[str] = None):
@@ -360,24 +346,21 @@ async def calculate_volatility(config: Dict[str, Any], avg_iv: float):
         raise HTTPException(status_code=500, detail="No valid returns for volatility calculation.")
 
     # Realized Volatility (7-day annualized)
-    # Ensure there are enough data points for a 7-day window
     if len(nifty_data) >= 7:
         realized_vol_7_day = nifty_data['Returns'].rolling(window=7).std().iloc[-1] * np.sqrt(252) * 100
     else:
-        realized_vol_7_day = 0.0 # Not enough data for 7-day, handle appropriately
+        realized_vol_7_day = 0.0
 
     # GARCH(1,1) Volatility (7-day forecast)
     try:
-        if len(nifty_data) < 100: # Need sufficient data for GARCH
+        if len(nifty_data) < 100: # Need sufficient data for robust GARCH
              logger.warning("Not enough data for robust GARCH model, using simpler estimate.")
              garch_forecast_7_day = avg_iv # Fallback to avg_iv if data insufficient
         else:
             model = arch_model(nifty_data['Returns'] * 100, vol='Garch', p=1, q=1)
             res = model.fit(disp='off')
-            # Forecast 7 days ahead, then annualize
             forecast = res.forecast(horizon=7)
             garch_variance = forecast.variance.iloc[-1]
-            # Convert daily variance to daily standard deviation, then annualize for 7 days
             garch_forecast_7_day = np.sqrt(garch_variance).mean() * np.sqrt(252)
     except Exception as e:
         logger.error(f"Error in GARCH model: {e}. Falling back to avg_iv.")
@@ -387,7 +370,6 @@ async def calculate_volatility(config: Dict[str, Any], avg_iv: float):
     iv_rv_spread = avg_iv - realized_vol_7_day
 
     # IV Percentile
-    # Ensure 'IV' column exists in ivp_data and is numeric
     ivp_data['IV'] = pd.to_numeric(ivp_data['IV'], errors='coerce')
     ivp_data.dropna(subset=['IV'], inplace=True)
 
@@ -399,52 +381,35 @@ async def calculate_volatility(config: Dict[str, Any], avg_iv: float):
     return realized_vol_7_day, garch_forecast_7_day, iv_rv_spread, iv_percentile
 
 
-async def get_market_metrics_data(access_token: str, index: str):
+async def get_market_metrics_data(index: str):
     """
-    Fetches market metrics data (like PCR, Max Pain, Days to Expiry) dynamically.
-    For PCR and Max Pain, this often requires extensive option chain analysis,
-    which can be complex to do purely from Upstox /option/contract and /market-quote endpoints
-    without external tools or significant processing.
-    For this build, we will simulate these or keep them simple based on available Upstox data.
-    Days to Expiry is calculated from the dynamic expiry.
+    Fetches market metrics data.
+    NOTE: Real-time Open Interest (OI) for accurate PCR and Max Pain calculation is NOT
+    available via Upstox's public REST API (as per provided openapi.txt), only historical.
+    To implement live PCR/Max Pain, a dedicated real-time WebSocket connection to all
+    option instruments would be required to aggregate OI data on the server side.
+    Therefore, Max Pain and PCR will be returned as None.
+    Days to Expiry is calculated from dynamic expiry.
     """
     logger.info("Fetching market metrics data...")
     
     # Get current expiry for 'days_to_expiry'
-    expiries_data = await get_expiries_endpoint(index=index, access_token=access_token)
+    # Need access token here if not coming from a dependency
+    expiries_data = await get_expiries_endpoint(index=index, access_token=await get_upstox_access_token_dep())
     current_expiry_str = expiries_data.get("current_expiry")
     
     days_to_expiry = 0
     if current_expiry_str:
         current_expiry_date = datetime.strptime(current_expiry_str, "%Y-%m-%d").date()
         days_to_expiry = (current_expiry_date - date.today()).days
-        if days_to_expiry < 0: # If current expiry has passed, find the next one
-            # This is already handled in get_expiries_endpoint, but a double check.
-            # For simplicity, if negative, assume 0 or consider it a past expiry which shouldn't happen with the logic above
+        if days_to_expiry < 0:
             days_to_expiry = 0
 
-    # PCR and Max Pain are harder to derive directly from simple Upstox API calls
-    # without downloading full historical and live option chain and calculating
-    # Open Interest. For a production system, this would typically involve:
-    # 1. Fetching all CE/PE contracts for an expiry.
-    # 2. Fetching live Open Interest for each contract (if available, Upstox has `/v2/historical-open-interest` for history).
-    # 3. Summing OI for CEs and PEs at each strike to determine Max Pain.
-    # 4. Calculating Put-Call Ratio from total OI or traded volume.
-
-    # For now, these will be placeholders or based on a simplified logic.
-    pcr = 1.0 # Placeholder
-    max_pain = 0 # Placeholder, would depend on the index and option chain
-
-    if index.lower() == "nifty":
-        max_pain = 23000 # Example placeholder for Nifty
-    elif index.lower() == "sensex":
-        max_pain = 75000 # Example placeholder for Sensex
-    
-    # A simplified PCR calculation based on spot price and option types (very basic)
-    # This would need a more robust implementation using actual OI data.
-    # This is a place where live OI data from Upstox would be integrated.
-    # As per openapi.txt, `/v2/historical-open-interest` exists, but not for live.
-    # For a *real* solution, streaming data or a dedicated OI endpoint would be needed.
+    # Max Pain and PCR cannot be accurately calculated without real-time Open Interest data.
+    # Upstox's provided OpenAPI only lists historical OI.
+    # Therefore, returning None for these metrics.
+    pcr = None
+    max_pain = None
 
     return {
         "pcr": pcr,
@@ -455,37 +420,39 @@ async def get_market_metrics_data(access_token: str, index: str):
 async def calculate_regime_score(access_token: str, index: str):
     """
     Calculates a multi-factor regime score.
-    This is a complex module that would ideally involve:
-    - Volatility (Realized, IV, GARCH)
-    - Trend (e.g., moving averages, ADX)
-    - Sentiment (e.g., PCR, VIX)
-    - Macroeconomic factors
     """
     logger.info("Calculating regime score...")
 
-    # Fetch relevant market data for regime classification
     try:
         nifty_spot_key = f"{INDEX_TO_INSTRUMENT_PREFIX[index.lower()]}|{INDEX_TO_CONTRACT_SYMBOL[index.lower()]}{' 50' if index.lower() == 'nifty' else ''}"
         spot_price = await get_spot_price_from_upstox(nifty_spot_key, access_token)
+        if spot_price is None:
+            raise ValueError(f"Could not fetch spot price for {index} to calculate regime score.")
         
-        # Placeholder for average IV. In a real scenario, this would involve
-        # fetching option chain and calculating ATM IV or a weighted average IV.
-        # For now, using a dummy value or deriving from option Greeks if possible.
-        # This needs a more direct way to get overall IV for the index.
-        # For a full implementation, you'd fetch option chain, then get Greeks for ATM options to derive average IV.
-        avg_iv = 15.0 # Dummy average IV
+        # Approximate average IV from ATM option.
+        expiries_data = await get_expiries_endpoint(index=index, access_token=access_token)
+        current_expiry_str = expiries_data.get("current_expiry")
+        if not current_expiry_str:
+            raise ValueError(f"Could not determine current expiry for {index} for regime score.")
+        
+        option_chain = await get_option_chain_from_upstox(index, current_expiry_str, access_token)
+        atm_strike = int(round(spot_price / 100) * 100)
+        atm_ce_greeks = None
+        if atm_strike in option_chain and option_chain[atm_strike]["CE"]:
+            atm_ce_greeks = await get_option_greeks_from_upstox(option_chain[atm_strike]["CE"]["instrument_token"], access_token)
+        
+        avg_iv = atm_ce_greeks.get("iv", 0.0) if atm_ce_greeks else 0.0
 
-        # Use the volatility calculation for some inputs
-        config = await get_config(access_token) # Get the full config to access historical data URLs
+        config = await get_config(access_token)
         realized_vol_7_day, garch_forecast_7_day, iv_rv_spread, iv_percentile = await calculate_volatility(config, avg_iv)
 
-        # Additional factors (placeholders for now)
-        trend_strength = 0.6 # From trend analysis
-        sentiment_score = 0.8 # From PCR, VIX, etc.
+        # Additional factors (placeholders, these would need more data/logic)
+        trend_strength = 0.6
+        sentiment_score = 0.8
         
-        # Simple weighted average for regime score
+        # Simple weighted average for regime score, normalized.
         regime_score = (
-            (realized_vol_7_day / 50.0) * 0.2 + # Normalize RV
+            (realized_vol_7_day / 50.0) * 0.2 + # Normalize RV (assuming max 50%)
             (garch_forecast_7_day / 50.0) * 0.2 + # Normalize GARCH
             (iv_percentile) * 0.2 + # IVP is already 0-1
             trend_strength * 0.2 +
@@ -501,35 +468,25 @@ async def calculate_regime_score(access_token: str, index: str):
 async def evaluate_risk(active_trades: List[TradeRequest]):
     """
     Performs position-level, portfolio-level checks, and behavioral rules.
-    This is a complex module involving real-time market data, P&L calculations,
-    and user-defined risk limits.
+    This module uses the provided active_trades for evaluation.
     """
     logger.info(f"Evaluating risk for {len(active_trades)} trades...")
     
-    # Example: Calculate total unrealized PnL
     total_unrealized_pnl = sum(trade.unrealized_pnl for trade in active_trades)
-    
-    # Example: Check capital deployed vs. limits
     total_capital_deployed = sum(trade.capital_used for trade in active_trades if trade.capital_used is not None)
     
     # Dummy config for risk limits (in a real app, fetch from user settings or config)
-    mock_total_funds = 2000000 # Example total funds
-    daily_risk_limit = mock_total_funds * 0.02 # 2% daily risk limit
+    mock_total_funds = 2000000
+    daily_risk_limit = mock_total_funds * 0.02
 
-    # Check if total unrealized loss exceeds daily risk limit
     exceeds_daily_limit = False
     if total_unrealized_pnl < 0 and abs(total_unrealized_pnl) > daily_risk_limit:
         exceeds_daily_limit = True
 
-    # Behavioral rules (examples)
-    # - Too many concurrent trades
-    # - Too much capital allocated to one strategy/instrument
-    # - High gamma exposure
-    
     overall_risk = "low"
     if exceeds_daily_limit:
         overall_risk = "high"
-    elif total_capital_deployed > mock_total_funds * 0.5: # Example: more than 50% capital deployed
+    elif total_capital_deployed > mock_total_funds * 0.5:
         overall_risk = "medium"
 
     return {
@@ -561,10 +518,10 @@ async def suggest_strategy(iv_percentile: float, regime_score: float, days_to_ex
         suggestions.append("Iron Fly (Medium IVP, neutral)")
         suggestions.append("Credit Spreads (Medium IVP, directional bias)")
 
-    # Adjust based on Regime Classification (simplified example)
+    # Adjust based on Regime Classification
     if regime_score >= 0.7: # Bullish/Strong Up-trend
         if "Iron Condor (High IVP)" in suggestions:
-            suggestions.remove("Iron Condor (High IVP)") # Less optimal for strong trend
+            suggestions.remove("Iron Condor (High IVP)")
         if "Short Straddle/Strangle (High IVP)" in suggestions:
             suggestions.remove("Short Straddle/Strangle (High IVP)")
         suggestions.append("Bull Call Spread (Strong Bullish)")
@@ -579,9 +536,8 @@ async def suggest_strategy(iv_percentile: float, regime_score: float, days_to_ex
 
     # Adjust based on Days to Expiry
     if days_to_expiry < 7: # Short-term expiry (more theta decay)
-        # Prioritize theta positive strategies
         if "Iron Condor (High IVP)" in suggestions:
-            pass # Keep if already suggested
+            pass
         elif "Iron Condor (High IVP)" not in suggestions and iv_percentile >= 0.70:
             suggestions.append("Iron Condor (Short DTE, High IVP)")
         if "Short Straddle/Strangle (High IVP)" in suggestions:
@@ -589,18 +545,15 @@ async def suggest_strategy(iv_percentile: float, regime_score: float, days_to_ex
         elif "Short Straddle/Strangle (High IVP)" not in suggestions and iv_percentile >= 0.70:
             suggestions.append("Short Straddle/Strangle (Short DTE, High IVP)")
         
-        # Remove strategies that require more time
         for s in ["Calendar Spread (Low IVP, time decay)", "Long Straddle/Strangle (Low IVP)"]:
             if s in suggestions: suggestions.remove(s)
 
     elif days_to_expiry > 30: # Long-term expiry (less theta decay, more vega sensitivity)
-        # Can consider buying strategies or wider spreads
         if iv_percentile <= 0.30 and "Long Straddle/Strangle (Low IVP)" not in suggestions:
             suggestions.append("Long Straddle/Strangle (Long DTE, Low IVP)")
         if "Calendar Spread (Low IVP, time decay)" not in suggestions:
              suggestions.append("Calendar Spread (Long DTE, Low IVP)")
 
-    # Remove duplicates and return
     return list(set(suggestions))
 
 # --- CONFIGURATION & UPSTOX API SETUP ---
@@ -610,24 +563,23 @@ def get_upstox_headers(access_token: str) -> Dict[str, str]:
     """
     return {
         "accept": "application/json",
-        "Api-Version": "2.0", # Defaulting to 2.0 for general calls, will override for V3 where needed
+        "Api-Version": "2.0",
         "Authorization": f"Bearer {access_token}"
     }
 
 async def get_config(access_token: str) -> Dict[str, Any]:
     """
     Retrieves dynamic configuration, including Upstox API headers and general settings.
-    Expiry and instrument details will be fetched dynamically via specific endpoints.
     """
     upstox_headers = get_upstox_headers(access_token)
     config = {
         "base_url": "https://api.upstox.com/v2",
-        "v3_url": "https://api-v2.upstox.com/v3", # Corrected V3 URL as per openapi.txt
+        "v3_url": "https://api-v2.upstox.com/v3",
         "headers": upstox_headers,
         "nifty_url": NIFTY_HIST_URL,
         "ivp_url": IVP_HIST_URL,
         "event_url": UPCOMING_EVENTS_URL,
-        "total_funds": 2000000, # Default total funds, can be made dynamic
+        "total_funds": 2000000,
         "risk_config": {
             "Iron Fly": {"capital_pct": 0.30, "risk_per_trade_pct": 0.01},
             "Iron Condor": {"capital_pct": 0.25, "risk_per_trade_pct": 0.015},
@@ -640,11 +592,10 @@ async def get_config(access_token: str) -> Dict[str, Any]:
         },
         "daily_risk_limit_pct": 0.02,
         "weekly_risk_limit_pct": 0.03,
-        "lot_size": 50 # Nifty lot size as of recent changes (was 75) - adjust if needed
+        "lot_size": 50 # Nifty lot size
     }
     try:
         async with httpx.AsyncClient() as client:
-            # Fetch funds and margin
             funds_resp = await client.get(f"{config['base_url']}/user/get-funds-and-margin", headers=config['headers'])
             funds_resp.raise_for_status()
             funds = funds_resp.json()["data"]["equity"]
@@ -656,8 +607,6 @@ async def get_config(access_token: str) -> Dict[str, Any]:
         logger.error(f"Network error fetching funds: {e}")
         raise HTTPException(status_code=500, detail=f"Network error fetching funds: {str(e)}")
     return config
-
-# --- Upstox API Integration ---
 
 # Helper to map index to instrument key prefix
 INDEX_TO_INSTRUMENT_PREFIX = {
@@ -675,9 +624,8 @@ async def get_expiries_from_upstox(index: str, access_token: str) -> List[str]:
     Fetches all available expiry dates for a given index from Upstox.
     Uses /option/contract to pull all expiries.
     """
-    # Construct the base instrument key for the index
     base_instrument_key = f"{INDEX_TO_INSTRUMENT_PREFIX[index.lower()]}|{INDEX_TO_CONTRACT_SYMBOL[index.lower()]}"
-    if index.lower() == "nifty": # Nifty uses "NIFTY 50"
+    if index.lower() == "nifty":
         base_instrument_key += " 50"
 
     url = "https://api-v2.upstox.com/v2/option/contract"
@@ -722,10 +670,9 @@ async def get_option_chain_from_upstox(index: str, expiry: str, access_token: st
 
             option_chain = {}
             for contract in all_contracts:
-                # Upstox returns expiry in 'YYYY-MM-DD' format, ensure consistent comparison
                 if contract["expiry"] == expiry:
                     strike_price = int(contract["strike_price"])
-                    option_type = contract["option_type"] # 'CE' or 'PE'
+                    option_type = contract["option_type"]
                     instrument_token = contract["instrument_key"]
 
                     if strike_price not in option_chain:
@@ -843,7 +790,6 @@ async def login():
         "client_id": UPSTOX_API_KEY,
         "redirect_uri": UPSTOX_REDIRECT_URI
     }
-    # Build the URL manually to ensure it's correct
     query_string = "&".join([f"{k}={v}" for k, v in params.items()])
     full_auth_url = f"{auth_url}?{query_string}"
     return JSONResponse(content={"authorization_url": full_auth_url})
@@ -887,12 +833,12 @@ async def get_journals():
     return {"journals": journals}
 
 @app.get("/expiries", response_model=Dict[str, Optional[str]])
-async def get_expiries_endpoint(index: str = Query(..., description="Index name, e.g., NIFTY or SENSEX")):
+async def get_expiries_endpoint(index: str = Query(..., description="Index name, e.g., NIFTY or SENSEX"),
+                                access_token: str = Depends(get_upstox_access_token_dep)):
     """
     Retrieves current, next weekly, and next monthly expiry dates for Nifty or Sensex.
     Automatically detects holidays or special expiry shifts.
     """
-    access_token = await get_upstox_access_token_dep() # Dependency for access token
     if index.upper() not in ["NIFTY", "SENSEX"]:
         raise HTTPException(status_code=400, detail="Invalid index. Must be NIFTY or SENSEX.")
 
@@ -903,25 +849,19 @@ async def get_expiries_endpoint(index: str = Query(..., description="Index name,
     next_weekly_expiry = None
     next_monthly_expiry = None
 
-    # Filter out past expiries and convert to datetime objects for easier comparison
     future_expiries_dt = sorted([datetime.strptime(e, "%Y-%m-%d").date() for e in all_expiries if datetime.strptime(e, "%Y-%m-%d").date() >= today])
 
     if not future_expiries_dt:
         raise HTTPException(status_code=404, detail="No upcoming expiries found.")
 
-    # Current Expiry: The first expiry that is today or in the future
     current_expiry = future_expiries_dt[0].strftime("%Y-%m-%d")
 
-    # Determine next weekly and next monthly expiry
-    weekly_expiries = sorted([e for e in future_expiries_dt if e.weekday() == 3]) # Thursday (0=Monday, 3=Thursday)
+    weekly_expiries = sorted([e for e in future_expiries_dt if e.weekday() == 3])
     
-    # Heuristic for monthly expiry: last Thursday of the month
     monthly_expiries = []
     seen_months_years = set()
     for exp_date in future_expiries_dt:
-        if exp_date.weekday() == 3: # If it's a Thursday
-            # Check if it's the last Thursday of the month
-            # By checking if adding 7 days moves to the next month
+        if exp_date.weekday() == 3:
             if (exp_date + timedelta(days=7)).month != exp_date.month:
                 month_year = (exp_date.year, exp_date.month)
                 if month_year not in seen_months_years:
@@ -929,13 +869,11 @@ async def get_expiries_endpoint(index: str = Query(..., description="Index name,
                     seen_months_years.add(month_year)
     monthly_expiries = sorted(monthly_expiries)
 
-    # Find next weekly expiry AFTER current_expiry
     for exp in weekly_expiries:
         if exp > datetime.strptime(current_expiry, "%Y-%m-%d").date():
             next_weekly_expiry = exp.strftime("%Y-%m-%d")
             break
     
-    # Find next monthly expiry AFTER current_expiry
     for exp in monthly_expiries:
         if exp > datetime.strptime(current_expiry, "%Y-%m-%d").date():
             next_monthly_expiry = exp.strftime("%Y-%m-%d")
@@ -952,11 +890,11 @@ async def get_expiries_endpoint(index: str = Query(..., description="Index name,
 async def get_option_chain_endpoint(
     index: str = Query(..., description="Index name, e.g., NIFTY or SENSEX"),
     expiry: str = Query(..., description="Expiry date in YYYY-MM-DD format"),
+    access_token: str = Depends(get_upstox_access_token_dep)
 ):
     """
     Retrieves the full option chain for a specified index and expiry.
     """
-    access_token = await get_upstox_access_token_dep()
     if index.upper() not in ["NIFTY", "SENSEX"]:
         raise HTTPException(status_code=400, detail="Invalid index. Must be NIFTY or SENSEX.")
     
@@ -973,47 +911,54 @@ async def get_option_chain_endpoint(
 @app.post("/place-order", response_model=Dict[str, Any])
 async def place_order_endpoint(
     order_input: PlaceOrderInput,
+    access_token: str = Depends(get_upstox_access_token_dep)
 ):
     """
-    Places a regular or GTT order on Upstox. Handles dynamic instrument token fetching
-    and multi-leg trades.
+    Places regular or GTT orders for multi-leg strategies on Upstox.
+    After placing, it attempts to check and log the fill status for each leg.
     """
-    access_token = await get_upstox_access_token_dep()
-    
     headers = get_upstox_headers(access_token)
     headers["Api-Version"] = "3.0" # Use API-Version 3.0 for order placement
 
-    results = []
+    placed_orders_info = []
     order_type_str = "REGULAR"
 
-    for leg in order_input.legs:
+    for leg_idx, leg in enumerate(order_input.legs):
         instrument_token = await get_instrument_token(
             order_input.index, leg.strike, order_input.expiry, leg.option_type, access_token
         )
         if not instrument_token:
-            raise HTTPException(status_code=404, detail=f"Could not resolve instrument token for {order_input.index} {leg.strike} {leg.option_type} on {order_input.expiry}")
+            logger.error(f"Could not resolve instrument token for leg {leg_idx}: {order_input.index} {leg.strike} {leg.option_type} on {order_input.expiry}")
+            placed_orders_info.append({"status": "failed", "message": f"Instrument token not found for leg {leg_idx}", "leg": leg.dict()})
+            continue
 
         order_payload = {
             "quantity": leg.quantity,
             "instrument_token": instrument_token,
-            "product": "D",  # Assuming 'D' for Delivery/Derivatives for options
+            "product": "D", # Assuming 'D' for Delivery/Derivatives for options
             "transaction_type": leg.transaction_type,
             "order_type": leg.order_type,
         }
 
         if leg.order_type == "LIMIT":
             if leg.price is None:
-                raise HTTPException(status_code=400, detail="Price is required for LIMIT orders in each leg.")
+                logger.error(f"Price is required for LIMIT order in leg {leg_idx}.")
+                placed_orders_info.append({"status": "failed", "message": f"Price missing for LIMIT order in leg {leg_idx}", "leg": leg.dict()})
+                continue
             order_payload["price"] = leg.price
         elif leg.price is not None and leg.order_type == "MARKET":
-            logger.warning(f"Price provided for MARKET order in leg: {leg.strike} {leg.option_type}. Price will be ignored.")
+            logger.warning(f"Price provided for MARKET order in leg {leg_idx}: {leg.strike} {leg.option_type}. Price will be ignored by Upstox.")
 
         if order_input.gtt:
             gtt_url = "https://api-v2.upstox.com/v3/order/gtt/place"
             if leg.order_type == "MARKET":
-                raise HTTPException(status_code=400, detail="GTT orders cannot be MARKET orders.")
+                logger.error(f"GTT orders cannot be MARKET orders for leg {leg_idx}.")
+                placed_orders_info.append({"status": "failed", "message": f"GTT orders cannot be MARKET orders for leg {leg_idx}", "leg": leg.dict()})
+                continue
             if leg.price is None:
-                raise HTTPException(status_code=400, detail="Price is required for GTT LIMIT orders in each leg.")
+                logger.error(f"Price is required for GTT LIMIT order in leg {leg_idx}.")
+                placed_orders_info.append({"status": "failed", "message": f"Price missing for GTT LIMIT order in leg {leg_idx}", "leg": leg.dict()})
+                continue
             
             # Simplified GTT rule: single trigger at the provided price
             gtt_order_payload = {
@@ -1037,57 +982,138 @@ async def place_order_endpoint(
                 async with httpx.AsyncClient() as client:
                     response = await client.post(gtt_url, json=gtt_order_payload, headers=headers)
                     response.raise_for_status()
-                    results.append(response.json())
+                    response_data = response.json()
+                    order_id = response_data.get("data", {}).get("order_id")
+                    placed_orders_info.append({
+                        "status": "success",
+                        "order_id": order_id,
+                        "leg": leg.dict(),
+                        "raw_response": response_data
+                    })
+                    logger.info(f"GTT order placed for leg {leg_idx}: {order_id}")
             except httpx.HTTPStatusError as e:
-                logger.error(f"HTTP error placing GTT order for leg {leg.strike} {leg.option_type}: {e.response.status_code} - {e.response.text}")
-                raise HTTPException(status_code=e.response.status_code, detail=f"Error placing GTT order: {e.response.text}")
+                logger.error(f"HTTP error placing GTT order for leg {leg_idx} ({leg.strike} {leg.option_type}): {e.response.status_code} - {e.response.text}")
+                placed_orders_info.append({
+                    "status": "failed",
+                    "message": f"HTTP error: {e.response.text}",
+                    "leg": leg.dict(),
+                    "status_code": e.response.status_code
+                })
             except httpx.RequestError as e:
-                logger.error(f"Network error placing GTT order for leg {leg.strike} {leg.option_type}: {e}")
-                raise HTTPException(status_code=500, detail=f"Network error placing GTT order: {str(e)}")
-        else:
+                logger.error(f"Network error placing GTT order for leg {leg_idx} ({leg.strike} {leg.option_type}): {e}")
+                placed_orders_info.append({
+                    "status": "failed",
+                    "message": f"Network error: {str(e)}",
+                    "leg": leg.dict()
+                })
+        else: # Regular order
             regular_order_url = "https://api-v2.upstox.com/v3/order/place"
             try:
                 async with httpx.AsyncClient() as client:
                     response = await client.post(regular_order_url, json=order_payload, headers=headers)
                     response.raise_for_status()
-                    results.append(response.json())
+                    response_data = response.json()
+                    order_id = response_data.get("data", {}).get("order_id")
+                    placed_orders_info.append({
+                        "status": "success",
+                        "order_id": order_id,
+                        "leg": leg.dict(),
+                        "raw_response": response_data
+                    })
+                    logger.info(f"Regular order placed for leg {leg_idx}: {order_id}")
             except httpx.HTTPStatusError as e:
-                logger.error(f"HTTP error placing regular order for leg {leg.strike} {leg.option_type}: {e.response.status_code} - {e.response.text}")
-                raise HTTPException(status_code=e.response.status_code, detail=f"Error placing regular order: {e.response.text}")
+                logger.error(f"HTTP error placing regular order for leg {leg_idx} ({leg.strike} {leg.option_type}): {e.response.status_code} - {e.response.text}")
+                placed_orders_info.append({
+                    "status": "failed",
+                    "message": f"HTTP error: {e.response.text}",
+                    "leg": leg.dict(),
+                    "status_code": e.response.status_code
+                })
             except httpx.RequestError as e:
-                logger.error(f"Network error placing regular order for leg {leg.strike} {leg.option_type}: {e}")
-                raise HTTPException(status_code=500, detail=f"Network error placing regular order: {str(e)}")
+                logger.error(f"Network error placing regular order for leg {leg_idx} ({leg.strike} {leg.option_type}): {e}")
+                placed_orders_info.append({
+                    "status": "failed",
+                    "message": f"Network error: {str(e)}",
+                    "leg": leg.dict()
+                })
+    
+    # --- Trade Fill Confirmation and Logging ---
+    # This section demonstrates how to check order status and log to Supabase.
+    # In a true real-time system, this would often be asynchronous polling or
+    # triggered by WebSocket events, not blocking the /place-order response.
+    # For a synchronous API call, this is a conceptual example of next steps.
+    final_trade_logs = []
+    for order_info in placed_orders_info:
+        if order_info["status"] == "success" and order_info["order_id"]:
+            order_id = order_info["order_id"]
+            leg_details = order_info["leg"]
+            try:
+                # Fetch final status of the order (this is a direct call for demonstration)
+                order_status_response = await get_order_status_endpoint(order_id=order_id, access_token=access_token)
+                
+                # Prepare data for Supabase logging
+                trade_data_to_log = {
+                    "strategy": "Multi-leg Order", # Or infer from request
+                    "instrument_token": order_status_response.instrument_token,
+                    "entry_price": order_status_response.average_price or order_status_response.price,
+                    "quantity": order_status_response.quantity,
+                    "realized_pnl": 0.0, # Will be calculated later upon exit
+                    "unrealized_pnl": 0.0, # Will be calculated later
+                    "notes": f"Multi-leg order leg: {leg_details['strike']} {leg_details['option_type']}",
+                    "status": order_status_response.status.lower(), # E.g., 'complete', 'open', 'rejected'
+                    "exchange_order_id": order_status_response.exchange_order_id,
+                    "transaction_type": order_status_response.transaction_type,
+                    "product": order_status_response.product,
+                    "order_type": order_status_response.order_type,
+                    "timestamp_entry": datetime.utcnow().isoformat() + "Z" # Assuming entry at placement
+                }
+                
+                log_status_code, log_response = await log_trade_to_supabase(trade_data_to_log)
+                final_trade_logs.append({
+                    "order_id": order_id,
+                    "status": order_status_response.status,
+                    "log_status": "success" if log_status_code in [200, 201] else "failed",
+                    "logged_data": trade_data_to_log
+                })
+            except HTTPException as e:
+                logger.error(f"Failed to get order status or log trade for {order_id}: {e.detail}")
+                final_trade_logs.append({
+                    "order_id": order_id,
+                    "status": "error_fetching_status",
+                    "log_status": "failed",
+                    "error_detail": e.detail
+                })
+        else:
+            final_trade_logs.append(order_info) # Include failed order placements as well
 
-    if results:
-        # Return a summary or list of results for multi-leg orders
-        # For simplicity, returning the first order_id and overall status
-        # A more robust response would map each leg to its order_id
-        return {
-            "status": "success",
-            "message": f"Successfully placed {len(results)} orders.",
-            "order_ids": [r.get("data", {}).get("order_id") for r in results if r.get("data")],
-            "type": order_type_str,
-            "details": results # Include full details for debugging/transparency
-        }
-    return {"status": "error", "message": "No orders were placed."}
+    overall_status = "success" if all(info["status"] == "success" for info in placed_orders_info) else "partial_success" if any(info["status"] == "success" for info in placed_orders_info) else "failed"
+
+    return {
+        "status": overall_status,
+        "message": f"{overall_status.replace('_', ' ').capitalize()} for multi-leg order. Check 'details' for each leg.",
+        "type": order_type_str,
+        "details": placed_orders_info,
+        "trade_logging_results": final_trade_logs
+    }
+
 
 @app.get("/ltp", response_model=Dict[str, Any])
-async def get_ltp_endpoint(instrument_key: str = Query(..., description="Instrument key (e.g., NSE_FO|NIFTY|2025-07-31|19500CE)")):
+async def get_ltp_endpoint(instrument_key: str = Query(..., description="Instrument key (e.g., NSE_FO|NIFTY|2025-07-31|19500CE)"),
+                           access_token: str = Depends(get_upstox_access_token_dep)):
     """
     Gets the real-time Last Traded Price (LTP) for a given instrument.
     """
-    access_token = await get_upstox_access_token_dep()
     ltp = await get_spot_price_from_upstox(instrument_key, access_token)
     if ltp is None:
         raise HTTPException(status_code=404, detail=f"LTP not found for instrument key: {instrument_key}")
     return {"instrument_key": instrument_key, "ltp": ltp}
 
 @app.get("/option-greeks", response_model=Dict[str, Any])
-async def get_option_greeks_endpoint(instrument_key: str = Query(..., description="Instrument key (e.g., NSE_FO|NIFTY|2025-07-31|19500CE)")):
+async def get_option_greeks_endpoint(instrument_key: str = Query(..., description="Instrument key (e.g., NSE_FO|NIFTY|2025-07-31|19500CE)"),
+                                     access_token: str = Depends(get_upstox_access_token_dep)):
     """
     Gets option Greeks (IV, delta, theta, vega, gamma) for a given instrument key.
     """
-    access_token = await get_upstox_access_token_dep()
     greeks = await get_option_greeks_from_upstox(instrument_key, access_token)
     if greeks is None:
         raise HTTPException(status_code=404, detail=f"Option Greeks not found for instrument key: {instrument_key}")
@@ -1095,11 +1121,11 @@ async def get_option_greeks_endpoint(instrument_key: str = Query(..., descriptio
 
 @app.get("/market-timings", response_model=Dict[str, Any])
 async def get_market_timings_endpoint(exchange: Optional[str] = Query(None, description="Exchange, e.g., NSE"),
-                                     product_type: Optional[str] = Query(None, description="Product type, e.g., EQUITY, FUTURE, OPTION")):
+                                     product_type: Optional[str] = Query(None, description="Product type, e.g., EQUITY, FUTURE, OPTION"),
+                                     access_token: str = Depends(get_upstox_access_token_dep)):
     """
     Gets market timings and holiday information.
     """
-    access_token = await get_upstox_access_token_dep()
     timings = await get_market_timings_from_upstox(exchange, product_type, access_token)
     if not timings:
         raise HTTPException(status_code=404, detail="Market timings not found.")
@@ -1108,14 +1134,14 @@ async def get_market_timings_endpoint(exchange: Optional[str] = Query(None, desc
 @app.get("/order-status", response_model=OrderStatusResponse)
 async def get_order_status_endpoint(
     order_id: str = Query(..., description="The ID of the order to check status for."),
+    access_token: str = Depends(get_upstox_access_token_dep)
 ):
     """
     Fetches the current status of a specific order from Upstox.
     """
-    access_token = await get_upstox_access_token_dep()
-    url = "https://api-v2.upstox.com/v2/order/details" # As per openapi.txt get_order_details in v2
+    url = "https://api-v2.upstox.com/v2/order/details"
     headers = get_upstox_headers(access_token)
-    params = {"order_id": order_id} # The API expects order_id as a query parameter
+    params = {"order_id": order_id}
 
     try:
         async with httpx.AsyncClient() as client:
@@ -1124,7 +1150,20 @@ async def get_order_status_endpoint(
             order_details = response.json()["data"]
             if not order_details:
                 raise HTTPException(status_code=404, detail=f"Order with ID {order_id} not found.")
-            return order_details
+            # Map Upstox response to OrderStatusResponse Pydantic model
+            return OrderStatusResponse(
+                exchange_order_id=order_details.get("exchange_order_id", order_id),
+                tradingsymbol=order_details.get("tradingsymbol"),
+                instrument_token=order_details.get("instrument_token"),
+                quantity=order_details.get("quantity"),
+                price=order_details.get("price"),
+                status=order_details.get("status"),
+                average_price=order_details.get("average_price"),
+                transaction_type=order_details.get("transaction_type"),
+                product=order_details.get("product"),
+                order_type=order_details.get("order_type"),
+                validity=order_details.get("validity")
+            )
     except httpx.HTTPStatusError as e:
         logger.error(f"HTTP error fetching order status for {order_id}: {e.response.status_code} - {e.response.text}")
         raise HTTPException(status_code=e.response.status_code, detail=f"Error fetching order status: {e.response.text}")
@@ -1135,19 +1174,21 @@ async def get_order_status_endpoint(
 @app.put("/modify-order", response_model=ModifyOrderResponse)
 async def modify_order_endpoint(
     modify_input: ModifyOrderInput,
+    access_token: str = Depends(get_upstox_access_token_dep)
 ):
     """
     Modifies an existing order (regular or GTT) on Upstox.
     """
-    access_token = await get_upstox_access_token_dep()
     headers = get_upstox_headers(access_token)
-    headers["Api-Version"] = "3.0" # Ensure V3 for modify
+    headers["Api-Version"] = "3.0"
 
-    # Determine if it's a GTT modify based on trigger_price being present
     is_gtt_modify = modify_input.trigger_price is not None
 
     if is_gtt_modify:
         url = "https://api-v2.upstox.com/v3/order/gtt/modify"
+        # GTT modify requires the original gtt_order_id and rules
+        # For simplicity, assuming 'ENTRY' strategy and re-providing a single rule.
+        # In a real scenario, you'd fetch the existing GTT rule or have its type stored.
         payload = {
             "gtt_order_id": modify_input.order_id,
             "rules": [
@@ -1171,7 +1212,6 @@ async def modify_order_endpoint(
             "price": modify_input.price,
             "order_type": modify_input.order_type
         }
-        # Clean payload from None values
         payload = {k: v for k, v in payload.items() if v is not None}
 
     try:
@@ -1189,12 +1229,13 @@ async def modify_order_endpoint(
 # --- VolGuard Specific Endpoints (Fully functional with Upstox integration) ---
 
 @app.get("/volguard/dashboard", response_model=Dict[str, Any])
-async def get_volguard_dashboard(index: str = Query("NIFTY", description="Index for dashboard: NIFTY or SENSEX")):
+async def get_volguard_dashboard(index: str = Query("NIFTY", description="Index for dashboard: NIFTY or SENSEX"),
+                                access_token: str = Depends(get_upstox_access_token_dep)):
     """
     Endpoint to provide a comprehensive VolGuard dashboard with combined metrics.
     Integrates data from Upstox (spot price, Greeks) with VolGuard's internal calculations.
+    NOTE: Real-time Open Interest data for PCR and Max Pain is not available via Upstox REST API.
     """
-    access_token = await get_upstox_access_token_dep()
     if index.upper() not in ["NIFTY", "SENSEX"]:
         raise HTTPException(status_code=400, detail="Invalid index. Must be NIFTY or SENSEX.")
 
@@ -1205,17 +1246,14 @@ async def get_volguard_dashboard(index: str = Query("NIFTY", description="Index 
     if spot_price is None:
         raise HTTPException(status_code=404, detail=f"Could not fetch spot price for {index}.")
 
-    # Fetch option chain for the current expiry to determine ATM strike and average IV
-    expiries_data = await get_expiries_endpoint(index=index)
+    expiries_data = await get_expiries_endpoint(index=index, access_token=access_token)
     current_expiry_str = expiries_data.get("current_expiry")
     if not current_expiry_str:
         raise HTTPException(status_code=404, detail=f"Could not determine current expiry for {index}.")
 
     option_chain = await get_option_chain_from_upstox(index, current_expiry_str, access_token)
     
-    # Calculate ATM strike and approximate average IV from option chain
-    # This is a simplified approach; a more robust one would involve iterating through multiple strikes.
-    atm_strike = int(round(spot_price / 100) * 100) # Nearest 100 for ATM
+    atm_strike = int(round(spot_price / 100) * 100)
     
     atm_ce_greeks = None
     atm_pe_greeks = None
@@ -1257,36 +1295,27 @@ async def get_volguard_dashboard(index: str = Query("NIFTY", description="Index 
     else:
         avg_iv, theta_avg, vega_avg, delta_avg, gamma_avg = 0.0, 0.0, 0.0, 0.0, 0.0
 
-    # India VIX is a separate instrument, typically needs its own instrument key or external source
-    # Upstox's /market-quote/quotes endpoint could be used if VIX has an instrument key.
-    # For now, a placeholder or fetched from a dedicated VIX instrument key.
-    # Assuming "NSE_INDEX|INDIA VIX" if available
-    vix_instrument_key = "NSE_INDEX|INDIA VIX" # This might vary, confirm actual Upstox VIX key
+    vix_instrument_key = "NSE_INDEX|INDIA VIX"
     india_vix_ltp = await get_spot_price_from_upstox(vix_instrument_key, access_token)
     india_vix = round(india_vix_ltp, 2) if india_vix_ltp else 0.0
 
-
-    # Calculate straddle price (ATM CE + ATM PE premium)
     straddle_price = 0.0
     if atm_ce_greeks and atm_ce_greeks.get("ltp"):
         straddle_price += atm_ce_greeks["ltp"]
     if atm_pe_greeks and atm_pe_greeks.get("ltp"):
         straddle_price += atm_pe_greeks["ltp"]
     
-    # Probability of Profit (POP) is complex and strategy-dependent, here simplified/placeholder
-    pop = 0.5 # Placeholder
+    pop = 0.5 # Placeholder, requires complex calculation or external data
 
-    # Market metrics data (PCR, Max Pain, Days to Expiry)
-    market_metrics_data = await get_market_metrics_data(access_token, index)
+    market_metrics_data = await get_market_metrics_data(index)
 
-    # Calculate volatility metrics (HV, GARCH, IV-RV Spread, IV Percentile)
     realized_vol_7_day, garch_forecast_7_day, iv_rv_spread, iv_percentile = await calculate_volatility(config, avg_iv)
 
     logger.info("Option Seller Dashboard data compiled successfully.")
     return {
         "spot_price": round(spot_price, 2),
         "india_vix": india_vix,
-        "nifty_spot": round(spot_price, 2), # Using same as spot_price for now
+        "nifty_spot": round(spot_price, 2),
         "atm_strike": atm_strike,
         "straddle_price": round(straddle_price, 2),
         "avg_iv": round(avg_iv, 2),
@@ -1295,8 +1324,8 @@ async def get_volguard_dashboard(index: str = Query("NIFTY", description="Index 
         "delta": round(delta_avg, 4),
         "gamma": round(gamma_avg, 6),
         "pop": round(pop, 2),
-        "pcr": market_metrics_data["pcr"],
-        "max_pain": market_metrics_data["max_pain"],
+        "pcr": market_metrics_data["pcr"], # Will be None due to Upstox API limitation
+        "max_pain": market_metrics_data["max_pain"], # Will be None due to Upstox API limitation
         "days_to_expiry": market_metrics_data["days_to_expiry"],
         "hv_7_day": round(realized_vol_7_day, 2),
         "garch_7_day": round(garch_forecast_7_day, 2),
@@ -1305,28 +1334,25 @@ async def get_volguard_dashboard(index: str = Query("NIFTY", description="Index 
     }
 
 @app.post("/volguard/strategy-suggestion", response_model=Dict[str, Any])
-async def get_strategy_suggestion_endpoint(req: StrategyRequest, index: str = Query("NIFTY", description="Index for strategy suggestion: NIFTY or SENSEX")):
+async def get_strategy_suggestion_endpoint(req: StrategyRequest, 
+                                           index: str = Query("NIFTY", description="Index for strategy suggestion: NIFTY or SENSEX"),
+                                           access_token: str = Depends(get_upstox_access_token_dep)):
     """
     Provides strategy suggestions based on market conditions.
-    This will leverage the existing VolGuard strategy logic, fetching live data.
     """
-    access_token = await get_upstox_access_token_dep()
     if index.upper() not in ["NIFTY", "SENSEX"]:
         raise HTTPException(status_code=400, detail="Invalid index. Must be NIFTY or SENSEX.")
 
     config = await get_config(access_token)
 
-    # Fetch dynamic inputs for strategy suggestion
-    # Get current expiry for 'days_to_expiry'
-    expiries_data = await get_expiries_endpoint(index=index)
+    expiries_data = await get_expiries_endpoint(index=index, access_token=access_token)
     current_expiry_str = expiries_data.get("current_expiry")
     if not current_expiry_str:
         raise HTTPException(status_code=404, detail=f"Could not determine current expiry for {index}.")
     
     days_to_expiry = (datetime.strptime(current_expiry_str, "%Y-%m-%d").date() - date.today()).days
-    if days_to_expiry < 0: days_to_expiry = 0 # Should not happen with get_expiries_endpoint logic, but for safety
+    if days_to_expiry < 0: days_to_expiry = 0
 
-    # Get approximate average IV (could be improved by fetching multiple option Greeks)
     nifty_spot_key = f"{INDEX_TO_INSTRUMENT_PREFIX[index.lower()]}|{INDEX_TO_CONTRACT_SYMBOL[index.lower()]}{' 50' if index.lower() == 'nifty' else ''}"
     spot_price = await get_spot_price_from_upstox(nifty_spot_key, access_token)
     if spot_price is None:
@@ -1341,21 +1367,19 @@ async def get_strategy_suggestion_endpoint(req: StrategyRequest, index: str = Qu
     
     avg_iv = atm_ce_greeks.get("iv", 0.0) if atm_ce_greeks else 0.0
 
-    # Calculate IV Percentile (requires historical IV data and current average IV)
     realized_vol_7_day, garch_forecast_7_day, iv_rv_spread, iv_percentile = await calculate_volatility(config, avg_iv)
 
-    # Calculate Regime Score
     regime_score = await calculate_regime_score(access_token, index)
 
     suggested_strategies = await suggest_strategy(iv_percentile, regime_score, days_to_expiry)
     return {"suggested_strategies": suggested_strategies, "request": req.dict()}
 
 @app.get("/volguard/regime-classification", response_model=Dict[str, float])
-async def get_regime_classification_endpoint(index: str = Query("NIFTY", description="Index for regime classification: NIFTY or SENSEX")):
+async def get_regime_classification_endpoint(index: str = Query("NIFTY", description="Index for regime classification: NIFTY or SENSEX"),
+                                            access_token: str = Depends(get_upstox_access_token_dep)):
     """
     Returns the multi-factor regime classification score.
     """
-    access_token = await get_upstox_access_token_dep()
     if index.upper() not in ["NIFTY", "SENSEX"]:
         raise HTTPException(status_code=400, detail="Invalid index. Must be NIFTY or SENSEX.")
     regime_score = await calculate_regime_score(access_token, index)
@@ -1365,10 +1389,8 @@ async def get_regime_classification_endpoint(index: str = Query("NIFTY", descrip
 async def perform_risk_evaluation(req: RiskEvaluationRequest):
     """
     Performs position-level and portfolio-level risk evaluation.
+    This endpoint relies on the active_trades provided in the request body.
     """
-    # This endpoint relies on the active_trades provided in the request body.
-    # It does not directly pull live trades from Upstox (which would require fetching positions).
-    # If "active_trades" are expected to be fetched live, that would be a separate integration step.
     risk_assessment = await evaluate_risk(req.active_trades)
     return {"risk_assessment": risk_assessment}
 
@@ -1381,22 +1403,73 @@ async def get_current_financial_year():
     fy = get_financial_year(current_date)
     return {"financial_year": fy}
 
-# WebSocket endpoint for real-time data if needed (example structure)
+@app.post("/volguard/predict-volatility", response_model=Dict[str, float])
+async def predict_volatility(
+    input_features: VolatilityPredictionInput,
+    # The XGBoost model doesn't inherently need the Upstox access token for prediction
+    # unless its features are dynamically derived from live market data requiring the token.
+    # For this placeholder, we'll keep it optional or remove if features are entirely static.
+    # access_token: str = Depends(get_upstox_access_token_dep)
+):
+    """
+    Predicts future volatility using the pre-loaded XGBoost model.
+    The input features (feature1, feature2, feature3) are placeholders.
+    You will need to replace these with the actual features
+    that your `xgb_vol_model_v2.pkl` model was trained on.
+    """
+    global XGB_MODEL
+    if XGB_MODEL is None:
+        raise HTTPException(status_code=503, detail="XGBoost model not loaded. Please check server startup logs.")
+
+    try:
+        # Convert input features to a format the model expects (e.g., numpy array or DataFrame row)
+        # This is a placeholder for actual feature engineering/selection.
+        # Ensure the order and type of features match the model's training data.
+        model_input = np.array([[
+            input_features.feature1,
+            input_features.feature2,
+            input_features.feature3
+        ]])
+
+        prediction = XGB_MODEL.predict(model_input)[0]
+        return {"predicted_volatility": float(prediction)}
+    except Exception as e:
+        logger.error(f"Error during volatility prediction: {e}")
+        raise HTTPException(status_code=500, detail=f"Failed to make volatility prediction: {str(e)}")
+
+# WebSocket endpoint for real-time data
 @app.websocket("/ws")
 async def websocket_endpoint(websocket: WebSocket):
     await websocket.accept()
     logger.info("WebSocket client connected.")
     try:
+        # NOTE ON REAL-TIME DATA:
+        # A fully working real-time data feed from Upstox's WebSocket API
+        # would require establishing a separate WebSocket CLIENT connection
+        # to Upstox (e.g., using `websockets` library on the server side)
+        # Authenticating that client connection, subscribing to specific instrument keys,
+        # and then relaying the data received from Upstox to THIS FastAPI
+        # WebSocket endpoint (the SERVER).
+        # This requires persistent background tasks or a dedicated data streaming service
+        # beyond what can be directly embedded and managed within a single
+        # FastAPI endpoint function call.
+        # The structure below is for clients connecting TO THIS SERVER's WebSocket.
+        # To get Upstox data, you'd need to:
+        # 1. Establish a websocket.connect() to Upstox in a background task.
+        # 2. Authenticate and subscribe to desired instrument keys.
+        # 3. Process incoming messages from Upstox.
+        # 4. Use `await websocket.send_json()` (or similar) to push that data
+        #    to all connected clients of this `/ws` endpoint.
+        
         while True:
-            # You can send real-time market data or updates here
-            # For example, fetch LTP every few seconds and send it
-            # This would require a proper Upstox websocket integration
-            # The Upstox OpenAPI has a /websocket endpoint, which needs separate implementation
-            # using 'websockets' library for client-side connection to Upstox's websocket feed.
-            # Example:
-            # await websocket.send_json({"message": "Sending dummy real-time data for demonstration"})
-            await websockets.sleep(5) # Sleep to avoid busy-waiting, replace with actual data pushing logic
+            # Example: If you had a background task pushing data into a queue,
+            # you would retrieve from that queue here and send.
+            # await websocket.send_json({"message": "Real-time data placeholder: Implement Upstox WebSocket client in background."})
+            await websocket.receive_text() # Keep connection alive or receive client messages
+            # For a real push, you'd have client subscribe to instruments and then stream
+            # data back from a background process that is connected to Upstox.
     except WebSocketDisconnect:
         logger.info("WebSocket client disconnected.")
     except Exception as e:
         logger.error(f"WebSocket error: {e}")
+
