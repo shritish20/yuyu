@@ -14,57 +14,90 @@ st.set_page_config(
     initial_sidebar_state="expanded",
 )
 
-# --- Custom CSS for Dark Theme and Professional Styling ---
+# --- Enhanced CSS for Visual Appeal ---
 st.markdown("""
     <style>
-    /* Dark Theme */
+    /* Dark Theme with Neon Green Accents */
     .main {
-        background-color: #1E1E1E;
+        background-color: #121212;
         color: #E0E0E0;
+        font-family: 'Arial', sans-serif;
     }
     .stTextInput > div > div > input {
-        background-color: #2D2D2D;
+        background-color: #1E1E1E;
         color: #E0E0E0;
-        border: 1px solid #4CAF50;
+        border: 2px solid #00FF00;
+        border-radius: 5px;
+        padding: 8px;
     }
     .stButton > button {
-        background-color: #4CAF50;
-        color: white;
+        background: linear-gradient(45deg, #00FF00, #00CC00);
+        color: #121212;
+        font-weight: bold;
         border-radius: 5px;
         border: none;
-        padding: 8px 16px;
+        padding: 10px 20px;
+        transition: transform 0.2s;
     }
     .stButton > button:hover {
-        background-color: #45A049;
+        transform: scale(1.05);
+        background: linear-gradient(45deg, #00CC00, #00FF00);
     }
     .stSidebar {
-        background-color: #252526;
+        background-color: #1E1E1E;
+        border-right: 2px solid #00FF00;
     }
     .stTabs > div > button {
-        background-color: #2D2D2D;
+        background-color: #1E1E1E;
         color: #E0E0E0;
-        border: 1px solid #4CAF50;
+        border: 2px solid #00FF00;
+        border-radius: 5px;
+        margin: 5px;
     }
     .stTabs > div > button:hover {
-        background-color: #4CAF50;
-        color: white;
+        background: linear-gradient(45deg, #00FF00, #00CC00);
+        color: #121212;
     }
     h1, h2, h3, h4, h5, h6 {
-        color: #4CAF50;
+        color: #00FF00;
+        text-shadow: 0 0 5px #00FF00;
     }
     .metric-card {
-        background-color: #2D2D2D;
-        padding: 15px;
-        border-radius: 5px;
-        box-shadow: 0 2px 5px rgba(0,0,0,0.3);
+        background: linear-gradient(135deg, #1E1E1E, #252526);
+        padding: 20px;
+        border-radius: 10px;
+        box-shadow: 0 4px 10px rgba(0, 255, 0, 0.2);
+        transition: transform 0.2s;
+    }
+    .metric-card:hover {
+        transform: translateY(-5px);
     }
     .error {
         color: #FF4D4D;
         font-weight: bold;
+        background-color: #1E1E1E;
+        padding: 10px;
+        border-radius: 5px;
     }
     .success {
-        color: #4CAF50;
+        color: #00FF00;
         font-weight: bold;
+        background-color: #1E1E1E;
+        padding: 10px;
+        border-radius: 5px;
+    }
+    .header {
+        background: linear-gradient(45deg, #00FF00, #00CC00);
+        -webkit-background-clip: text;
+        color: transparent;
+        font-size: 2.5em;
+        text-align: center;
+        animation: gradient 3s ease infinite;
+    }
+    @keyframes gradient {
+        0% { background-position: 0% 50%; }
+        50% { background-position: 100% 50%; }
+        100% { background-position: 0% 50%; }
     }
     </style>
 """, unsafe_allow_html=True)
@@ -79,7 +112,8 @@ def validate_access_token(token: str) -> bool:
     try:
         response = requests.get(f"{BASE_API_URL}/expiries", params={"access_token": token}, timeout=5)
         return response.status_code == 200
-    except requests.RequestException:
+    except requests.RequestException as e:
+        st.error(f"Token validation failed: {str(e)}")
         return False
 
 def api_request(endpoint: str, method: str = "GET", params: dict = None, json_data: dict = None):
@@ -108,8 +142,8 @@ if "access_token" not in st.session_state:
 
 # --- Login Screen ---
 if not st.session_state["authenticated"]:
-    st.title("🔐 VoluGuard: Option Seller Cockpit")
-    st.markdown("Enter your Upstox access token to unlock the dashboard.")
+    st.markdown("<h1 class='header'>🔐 VoluGuard: Option Seller Cockpit</h1>", unsafe_allow_html=True)
+    st.markdown("Enter your Upstox access token to unlock the trading cockpit.")
     
     with st.form("login_form"):
         access_token = st.text_input("Upstox Access Token", type="password", placeholder="Enter your access token")
@@ -125,8 +159,8 @@ if not st.session_state["authenticated"]:
                 st.error("❌ Insert correct access token.")
 else:
     # --- Main Dashboard ---
-    st.title("📈 VoluGuard: Option Seller Cockpit")
-    st.markdown(f"**Connected** | Last Updated: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}")
+    st.markdown("<h1 class='header'>📈 VoluGuard: Option Seller Cockpit</h1>", unsafe_allow_html=True)
+    st.markdown(f"**Connected** | Last Updated: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')} IST")
 
     # Logout Button
     if st.button("🚪 Logout"):
@@ -139,14 +173,14 @@ else:
         selected = option_menu(
             "Navigation",
             ["Dashboard", "Strategy Suggestions", "Risk Evaluation", "Option Chain", "Trade Log", "Journal"],
-            icons=["house", "lightbulb", "shield", "table", "book", "journal"],
-            menu_icon="cast",
+            icons=["speedometer2", "lightbulb", "shield-check", "table", "book", "journal-text"],
+            menu_icon="rocket",
             default_index=0,
             styles={
-                "container": {"background-color": "#252526"},
-                "icon": {"color": "#4CAF50"},
-                "nav-link": {"color": "#E0E0E0", "--hover-color": "#4CAF50"},
-                "nav-link-selected": {"background-color": "#4CAF50", "color": "white"},
+                "container": {"background-color": "#1E1E1E"},
+                "icon": {"color": "#00FF00"},
+                "nav-link": {"color": "#E0E0E0", "--hover-color": "#00FF00"},
+                "nav-link-selected": {"background": "linear-gradient(45deg, #00FF00, #00CC00)", "color": "#121212"},
             }
         )
 
@@ -211,23 +245,25 @@ else:
             st.markdown(f"**Note**: {data.get('note', 'N/A')}")
             st.markdown(f"**Explanation**: {data.get('explanation', 'N/A')}")
             if data.get("event_warning"):
-                st.warning(data["event_warning"])
+                st.warning(f"⚠️ {data['event_warning']}")
             
             st.subheader("Recommended Strategies")
             for strategy in data.get("strategies", []):
-                with st.expander(f"📊 {strategy}"):
+                with st.expander(f"📊 {strategy}", expanded=False):
                     st.write(f"**Rationale**: {data.get('rationale', 'N/A')}")
+                    lots = st.number_input(f"Number of Lots for {strategy}", min_value=1, max_value=10, value=1, step=1)
                     details, details_error = api_request(
                         "/strategy/details",
                         method="POST",
-                        json_data={"strategy": strategy, "lots": 1}
+                        json_data={"strategy": strategy, "lots": lots}
                     )
                     if details_error:
                         st.error(details_error)
                     elif details:
                         st.write(f"**Premium**: ₹{details.get('premium_total', 0):.2f}")
                         st.write(f"**Max Profit**: ₹{details.get('max_profit', 0):.2f}")
-                        st.write(f"**Max Loss**: ₹{details.get('max_loss', float('inf')):.2f if details.get('max_loss') != float('inf') else 'Unlimited'}")
+                        max_loss = details.get('max_loss', float('inf'))
+                        st.write(f"**Max Loss**: {'Unlimited' if max_loss == float('inf') else f'₹{max_loss:.2f}'}")
                         st.write("**Strikes**:")
                         for strike in details.get("strikes", []):
                             st.write(f"- ₹{strike:.2f}")
@@ -242,26 +278,26 @@ else:
                             } for order in details.get("orders", [])
                         ])
                         st.table(orders_df)
+                        # Execute Strategy Button
+                        if st.button(f"Execute {strategy}", key=f"execute_{strategy}"):
+                            execute_data = {
+                                "orders": details.get("orders", []),
+                                "strategy": strategy
+                            }
+                            execute_response, execute_error = api_request(
+                                "/place/multileg",
+                                method="POST",
+                                json_data=execute_data
+                            )
+                            if execute_error:
+                                st.error(f"Execution failed: {execute_error}")
+                            else:
+                                st.success(f"✅ {strategy} executed successfully! Order ID: {execute_response.get('order_id', 'N/A')}")
 
     # --- Risk Evaluation Tab ---
     elif selected == "Risk Evaluation":
         st.header("Portfolio Risk Evaluation")
-        # Real trades should come from Upstox positions; using minimal sample to match API expectation
-        active_trades = [
-            {
-                "strategy": "Iron Fly",
-                "instrument_token": "NSE_FO|NIFTY",
-                "entry_price": 22000.0,
-                "quantity": 50.0,
-                "realized_pnl": 0.0,
-                "unrealized_pnl": 0.0,
-                "capital_used": 60000.0,
-                "potential_loss": 1000.0,
-                "sl_hit": False,
-                "vega": 150.0,
-                "status": "open"
-            }
-        ]
+        active_trades = []  # Fetch real positions from Upstox if available
         data, error = api_request(
             "/evaluate/risk",
             method="POST",
@@ -301,20 +337,23 @@ else:
                     "Unrealized P&L": "₹{:.2f}",
                     "Vega": "{:.2f}"
                 }))
-            
-            # Risk Visualization
-            if not summary_df.empty:
+                # Risk Visualization
                 fig = go.Figure(data=[
-                    go.Bar(name="Capital Used", x=summary_df["Strategy"], y=summary_df["Capital Used"]),
-                    go.Bar(name="Cap Limit", x=summary_df["Strategy"], y=summary_df["Cap Limit"])
+                    go.Bar(name="Capital Used", x=summary_df["Strategy"], y=summary_df["Capital Used"], marker_color='#00FF00'),
+                    go.Bar(name="Cap Limit", x=summary_df["Strategy"], y=summary_df["Cap Limit"], marker_color='#00CC00')
                 ])
                 fig.update_layout(
                     title="Capital Utilization by Strategy",
                     barmode="group",
                     template="plotly_dark",
-                    height=400
+                    height=400,
+                    plot_bgcolor="#121212",
+                    paper_bgcolor="#121212",
+                    font_color="#E0E0E0"
                 )
                 st.plotly_chart(fig, use_container_width=True)
+            else:
+                st.info("No risk data available. Ensure active trades are present.")
 
     # --- Option Chain Tab ---
     elif selected == "Option Chain":
@@ -336,10 +375,15 @@ else:
                     "Straddle Price": "₹{:.2f}",
                     "Total OI": "{:,.0f}"
                 }))
-                
                 # IV Skew Plot
-                fig = px.line(chain_df, x="Strike", y="IV Skew", title="IV Skew Across Strikes")
-                fig.update_layout(template="plotly_dark", height=400)
+                fig = px.line(chain_df, x="Strike", y="IV Skew", title="IV Skew Across Strikes", color_discrete_sequence=['#00FF00'])
+                fig.update_layout(
+                    template="plotly_dark",
+                    height=400,
+                    plot_bgcolor="#121212",
+                    paper_bgcolor="#121212",
+                    font_color="#E0E0E0"
+                )
                 st.plotly_chart(fig, use_container_width=True)
             else:
                 st.info("No option chain data available.")
@@ -348,13 +392,15 @@ else:
     elif selected == "Trade Log":
         st.header("Trade Log")
         status_filter = st.selectbox("Filter by Status", ["All", "open", "closed"])
+        if st.button("🔄 Refresh Trades"):
+            st.rerun()
         params = {}
         if status_filter != "All":
             params["status"] = status_filter
         data, error = api_request("/fetch/trades", params=params)
         
         if error:
-            st.error(error)
+            st.error(f"Failed to fetch trades: {error}")
         elif data:
             trades_df = pd.DataFrame(data.get("trades", []))
             if not trades_df.empty:
@@ -368,29 +414,33 @@ else:
                     "vega": "{:.2f}"
                 }))
             else:
-                st.info("No trades found for the selected filter.")
+                st.info("No trades found. Check Supabase configuration or place trades to populate the log.")
 
     # --- Journal Tab ---
     elif selected == "Journal":
         st.header("Trading Journal")
         with st.form("journal_form"):
-            title = st.text_input("Title")
-            content = st.text_area("Content")
+            title = st.text_input("Title", placeholder="Enter journal title")
+            content = st.text_area("Content", placeholder="Describe your trading day or insights")
             mood = st.selectbox("Mood", ["Positive", "Neutral", "Negative"])
-            tags = st.text_input("Tags (comma-separated)")
+            tags = st.text_input("Tags (comma-separated)", placeholder="e.g., volatility, strategy, learning")
             submit = st.form_submit_button("Add Journal Entry")
             
             if submit:
-                journal_data = {"title": title, "content": content, "mood": mood, "tags": tags}
-                data, error = api_request("/log/journal", method="POST", json_data=journal_data)
-                if error:
-                    st.error(error)
+                if not title or not content:
+                    st.error("Title and Content are required.")
                 else:
-                    st.success("Journal entry added successfully!")
+                    journal_data = {"title": title, "content": content, "mood": mood, "tags": tags}
+                    data, error = api_request("/log/journal", method="POST", json_data=journal_data)
+                    if error:
+                        st.error(f"Failed to save journal: {error}")
+                    else:
+                        st.success("✅ Journal entry saved successfully!")
+                        st.rerun()
         
         data, error = api_request("/fetch/journals")
         if error:
-            st.error(error)
+            st.error(f"Failed to fetch journals: {error}")
         elif data:
             journals_df = pd.DataFrame(data.get("journals", []))
             if not journals_df.empty:
@@ -401,4 +451,4 @@ else:
                         st.write(f"**Tags**: {journal.get('tags', 'N/A')}")
                         st.write(f"**Timestamp**: {journal.get('timestamp', 'N/A')}")
             else:
-                st.info("No journal entries found.")
+                st.info("No journal entries found. Add entries to start tracking your trading insights.")
