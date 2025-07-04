@@ -14,90 +14,109 @@ st.set_page_config(
     initial_sidebar_state="expanded",
 )
 
-# --- Enhanced CSS for Visual Appeal ---
+# --- Enhanced CSS for Eye-Catching Visual Appeal ---
 st.markdown("""
     <style>
-    /* Dark Theme with Neon Green Accents */
+    /* Futuristic Dark Theme with Neon Green Accents */
     .main {
-        background-color: #121212;
+        background-color: #0A0A0A;
         color: #E0E0E0;
-        font-family: 'Arial', sans-serif;
+        font-family: 'Roboto', sans-serif;
     }
     .stTextInput > div > div > input {
         background-color: #1E1E1E;
         color: #E0E0E0;
-        border: 2px solid #00FF00;
-        border-radius: 5px;
-        padding: 8px;
+        border: 3px solid #00FF00;
+        border-radius: 8px;
+        padding: 10px;
+        font-size: 16px;
     }
     .stButton > button {
         background: linear-gradient(45deg, #00FF00, #00CC00);
-        color: #121212;
+        color: #0A0A0A;
         font-weight: bold;
-        border-radius: 5px;
+        border-radius: 8px;
         border: none;
-        padding: 10px 20px;
-        transition: transform 0.2s;
+        padding: 12px 24px;
+        font-size: 16px;
+        transition: transform 0.3s, box-shadow 0.3s;
     }
     .stButton > button:hover {
-        transform: scale(1.05);
-        background: linear-gradient(45deg, #00CC00, #00FF00);
+        transform: scale(1.1);
+        box-shadow: 0 0 15px #00FF00;
     }
     .stSidebar {
         background-color: #1E1E1E;
-        border-right: 2px solid #00FF00;
+        border-right: 3px solid #00FF00;
     }
     .stTabs > div > button {
         background-color: #1E1E1E;
         color: #E0E0E0;
-        border: 2px solid #00FF00;
-        border-radius: 5px;
+        border: 3px solid #00FF00;
+        border-radius: 8px;
         margin: 5px;
+        font-size: 16px;
     }
     .stTabs > div > button:hover {
         background: linear-gradient(45deg, #00FF00, #00CC00);
-        color: #121212;
+        color: #0A0A0A;
     }
     h1, h2, h3, h4, h5, h6 {
         color: #00FF00;
-        text-shadow: 0 0 5px #00FF00;
+        text-shadow: 0 0 10px #00FF00;
+        font-weight: bold;
     }
     .metric-card {
         background: linear-gradient(135deg, #1E1E1E, #252526);
-        padding: 20px;
-        border-radius: 10px;
-        box-shadow: 0 4px 10px rgba(0, 255, 0, 0.2);
-        transition: transform 0.2s;
+        padding: 25px;
+        border-radius: 12px;
+        box-shadow: 0 6px 15px rgba(0, 255, 0, 0.3);
+        transition: transform 0.3s, box-shadow 0.3s;
+        text-align: center;
+        font-size: 18px;
     }
     .metric-card:hover {
-        transform: translateY(-5px);
+        transform: translateY(-8px);
+        box-shadow: 0 6px 20px rgba(0, 255, 0, 0.5);
     }
     .error {
         color: #FF4D4D;
         font-weight: bold;
         background-color: #1E1E1E;
-        padding: 10px;
-        border-radius: 5px;
+        padding: 15px;
+        border-radius: 8px;
+        border: 2px solid #FF4D4D;
     }
     .success {
         color: #00FF00;
         font-weight: bold;
         background-color: #1E1E1E;
-        padding: 10px;
-        border-radius: 5px;
+        padding: 15px;
+        border-radius: 8px;
+        border: 2px solid #00FF00;
     }
     .header {
         background: linear-gradient(45deg, #00FF00, #00CC00);
         -webkit-background-clip: text;
         color: transparent;
-        font-size: 2.5em;
+        font-size: 3em;
         text-align: center;
-        animation: gradient 3s ease infinite;
+        animation: gradient 2s ease infinite;
+        margin-bottom: 20px;
     }
     @keyframes gradient {
         0% { background-position: 0% 50%; }
         50% { background-position: 100% 50%; }
         100% { background-position: 0% 50%; }
+    }
+    .stMetric > div > div > div {
+        font-size: 20px !important;
+        color: #E0E0E0 !important;
+    }
+    .stMetric > div > div > div > div {
+        font-size: 28px !important;
+        color: #00FF00 !important;
+        text-shadow: 0 0 5px #00FF00;
     }
     </style>
 """, unsafe_allow_html=True)
@@ -143,7 +162,7 @@ if "access_token" not in st.session_state:
 # --- Login Screen ---
 if not st.session_state["authenticated"]:
     st.markdown("<h1 class='header'>🔐 VoluGuard: Option Seller Cockpit</h1>", unsafe_allow_html=True)
-    st.markdown("Enter your Upstox access token to unlock the trading cockpit.")
+    st.markdown("Enter your Upstox access token to unlock the ultimate trading cockpit.")
     
     with st.form("login_form"):
         access_token = st.text_input("Upstox Access Token", type="password", placeholder="Enter your access token")
@@ -178,9 +197,9 @@ else:
             default_index=0,
             styles={
                 "container": {"background-color": "#1E1E1E"},
-                "icon": {"color": "#00FF00"},
-                "nav-link": {"color": "#E0E0E0", "--hover-color": "#00FF00"},
-                "nav-link-selected": {"background": "linear-gradient(45deg, #00FF00, #00CC00)", "color": "#121212"},
+                "icon": {"color": "#00FF00", "font-size": "20px"},
+                "nav-link": {"color": "#E0E0E0", "--hover-color": "#00FF00", "font-size": "16px"},
+                "nav-link-selected": {"background": "linear-gradient(45deg, #00FF00, #00CC00)", "color": "#0A0A0A"},
             }
         )
 
@@ -190,27 +209,73 @@ else:
         if st.button("🔄 Refresh Live Dashboard"):
             st.rerun()
         data, error = api_request("/live/dashboard")
+        volatility_data, vol_error = api_request("/predict/volatility")
         
         if error:
             st.error(error)
         elif data:
-            st.subheader("Portfolio Summary")
+            st.subheader("Portfolio Snapshot")
             portfolio = data.get("portfolio", {})
-            col1, col2, col3 = st.columns(3)
+            col1, col2, col3, col4 = st.columns(4)
             with col1:
                 st.markdown("<div class='metric-card'>", unsafe_allow_html=True)
                 st.metric("Total Funds", f"₹{portfolio.get('total_funds', 0):.2f}")
-                st.metric("Capital Deployed", f"₹{portfolio.get('capital_deployed', 0):.2f}")
                 st.markdown("</div>", unsafe_allow_html=True)
             with col2:
                 st.markdown("<div class='metric-card'>", unsafe_allow_html=True)
-                st.metric("Exposure", f"{portfolio.get('exposure_percent', 0):.2f}%")
-                st.metric("Total P&L", f"₹{portfolio.get('total_pnl', 0):.2f}")
+                st.metric("Capital Deployed", f"₹{portfolio.get('capital_deployed', 0):.2f}")
                 st.markdown("</div>", unsafe_allow_html=True)
             with col3:
                 st.markdown("<div class='metric-card'>", unsafe_allow_html=True)
-                st.metric("Total Vega", f"{portfolio.get('total_vega', 0):.2f}")
-                st.metric("Total Theta", f"{portfolio.get('total_theta', 0):.2f}")
+                st.metric("Total P&L", f"₹{portfolio.get('total_pnl', 0):.2f}")
+                st.markdown("</div>", unsafe_allow_html=True)
+            with col4:
+                st.markdown("<div class='metric-card'>", unsafe_allow_html=True)
+                st.metric("Exposure", f"{portfolio.get('exposure_percent', 0):.2f}%")
+                st.markdown("</div>", unsafe_allow_html=True)
+            
+            st.subheader("Volatility Prediction (XGBoost)")
+            if vol_error:
+                st.error(vol_error)
+            elif volatility_data:
+                predicted_vol = volatility_data.get("predicted_volatility", 0)
+                st.markdown("<div class='metric-card'>", unsafe_allow_html=True)
+                st.metric("Predicted 7-Day Volatility", f"{predicted_vol:.2f}%")
+                st.markdown("**Input Metrics**:")
+                st.write(f"- ATM IV: {volatility_data.get('atm_iv', 0):.2f}%")
+                st.write(f"- Historical Volatility (HV): {volatility_data.get('hv', 0):.2f}%")
+                st.write(f"- Implied Volatility Percentile (IVP): {volatility_data.get('ivp', 0):.2f}%")
+                st.write(f"- Put-Call Ratio (PCR): {volatility_data.get('pcr', 0):.2f}")
+                st.write(f"- India VIX: {volatility_data.get('vix', 0):.2f}")
+                st.write(f"- Days to Expiry: {volatility_data.get('days_to_expiry', 0)}")
+                # Gauge Chart for Volatility
+                fig = go.Figure(go.Indicator(
+                    mode="gauge+number",
+                    value=predicted_vol,
+                    title={'text': "XGBoost Volatility Forecast (%)"},
+                    gauge={
+                        'axis': {'range': [0, 50], 'tickwidth': 1, 'tickcolor': "#E0E0E0"},
+                        'bar': {'color': "#00FF00"},
+                        'steps': [
+                            {'range': [0, 15], 'color': "#1E1E1E"},
+                            {'range': [15, 30], 'color': "#252526"},
+                            {'range': [30, 50], 'color': "#FF4D4D"}
+                        ],
+                        'threshold': {
+                            'line': {'color': "#00CC00", 'width': 4},
+                            'thickness': 0.75,
+                            'value': predicted_vol
+                        }
+                    }
+                ))
+                fig.update_layout(
+                    template="plotly_dark",
+                    height=300,
+                    plot_bgcolor="#0A0A0A",
+                    paper_bgcolor="#0A0A0A",
+                    font_color="#E0E0E0"
+                )
+                st.plotly_chart(fig, use_container_width=True)
                 st.markdown("</div>", unsafe_allow_html=True)
             
             st.subheader("Current Positions")
@@ -235,23 +300,24 @@ else:
                     barmode="group",
                     template="plotly_dark",
                     height=400,
-                    plot_bgcolor="#121212",
-                    paper_bgcolor="#121212",
-                    font_color="#E0E0E0"
+                    plot_bgcolor="#0A0A0A",
+                    paper_bgcolor="#0A0A0A",
+                    font_color="#E0E0E0",
+                    hoverlabel=dict(bgcolor="#1E1E1E", font_color="#E0E0E0")
                 )
                 st.plotly_chart(fig, use_container_width=True)
             else:
-                st.info("No current positions found.")
+                st.info("No current positions found. Place trades to populate this section.")
             
             st.subheader("Market Snapshot")
             market_data = data.get("market_data", {})
-            col4, col5 = st.columns(2)
-            with col4:
+            col5, col6 = st.columns(2)
+            with col5:
                 st.markdown("<div class='metric-card'>", unsafe_allow_html=True)
                 st.metric("Nifty Spot", f"₹{market_data.get('nifty_spot', 0):.2f}")
                 st.metric("India VIX", f"{market_data.get('india_vix', 0):.2f}")
                 st.markdown("</div>", unsafe_allow_html=True)
-            with col5:
+            with col6:
                 st.markdown("<div class='metric-card'>", unsafe_allow_html=True)
                 st.metric("ATM IV", f"{market_data.get('avg_iv', 0):.2f}%")
                 st.metric("Straddle Price", f"₹{market_data.get('straddle_price', 0):.2f}")
@@ -261,6 +327,7 @@ else:
     elif selected == "Market Dashboard":
         st.header("Market Dashboard")
         data, error = api_request("/option-seller-dashboard")
+        volatility_data, vol_error = api_request("/predict/volatility")
         
         if error:
             st.error(error)
@@ -290,6 +357,50 @@ else:
                 st.metric("Vega", f"{data.get('vega', 0):.2f}")
                 st.metric("7-Day HV", f"{data.get('hv_7_day', 0):.2f}%")
                 st.metric("GARCH 7-Day", f"{data.get('garch_7_day', 0):.2f}%")
+                st.markdown("</div>", unsafe_allow_html=True)
+            
+            st.subheader("Volatility Prediction (XGBoost)")
+            if vol_error:
+                st.error(vol_error)
+            elif volatility_data:
+                predicted_vol = volatility_data.get("predicted_volatility", 0)
+                st.markdown("<div class='metric-card'>", unsafe_allow_html=True)
+                st.metric("Predicted 7-Day Volatility", f"{predicted_vol:.2f}%")
+                st.markdown("**Input Metrics**:")
+                st.write(f"- ATM IV: {volatility_data.get('atm_iv', 0):.2f}%")
+                st.write(f"- Historical Volatility (HV): {volatility_data.get('hv', 0):.2f}%")
+                st.write(f"- Implied Volatility Percentile (IVP): {volatility_data.get('ivp', 0):.2f}%")
+                st.write(f"- Put-Call Ratio (PCR): {volatility_data.get('pcr', 0):.2f}")
+                st.write(f"- India VIX: {volatility_data.get('vix', 0):.2f}")
+                st.write(f"- Days to Expiry: {volatility_data.get('days_to_expiry', 0)}")
+                # Gauge Chart for Volatility
+                fig = go.Figure(go.Indicator(
+                    mode="gauge+number",
+                    value=predicted_vol,
+                    title={'text': "XGBoost Volatility Forecast (%)"},
+                    gauge={
+                        'axis': {'range': [0, 50], 'tickwidth': 1, 'tickcolor': "#E0E0E0"},
+                        'bar': {'color': "#00FF00"},
+                        'steps': [
+                            {'range': [0, 15], 'color': "#1E1E1E"},
+                            {'range': [15, 30], 'color': "#252526"},
+                            {'range': [30, 50], 'color': "#FF4D4D"}
+                        ],
+                        'threshold': {
+                            'line': {'color': "#00CC00", 'width': 4},
+                            'thickness': 0.75,
+                            'value': predicted_vol
+                        }
+                    }
+                ))
+                fig.update_layout(
+                    template="plotly_dark",
+                    height=300,
+                    plot_bgcolor="#0A0A0A",
+                    paper_bgcolor="#0A0A0A",
+                    font_color="#E0E0E0"
+                )
+                st.plotly_chart(fig, use_container_width=True)
                 st.markdown("</div>", unsafe_allow_html=True)
             
             st.subheader("Market Metrics")
@@ -354,7 +465,7 @@ else:
                         # Execute Strategy Button
                         if st.button(f"Execute {strategy}", key=f"execute_{strategy}"):
                             execute_data = {
-                                "legs": details.get("orders", []),  # Fixed: Changed "orders" to "legs"
+                                "legs": details.get("orders", []),
                                 "strategy": strategy
                             }
                             execute_response, execute_error = api_request(
@@ -370,7 +481,7 @@ else:
     # --- Risk Evaluation Tab ---
     elif selected == "Risk Evaluation":
         st.header("Portfolio Risk Evaluation")
-        active_trades = []  # Fetch real positions if available
+        active_trades = []
         data, error = api_request(
             "/evaluate/risk",
             method="POST",
@@ -420,8 +531,8 @@ else:
                     barmode="group",
                     template="plotly_dark",
                     height=400,
-                    plot_bgcolor="#121212",
-                    paper_bgcolor="#121212",
+                    plot_bgcolor="#0A0A0A",
+                    paper_bgcolor="#0A0A0A",
                     font_color="#E0E0E0"
                 )
                 st.plotly_chart(fig, use_container_width=True)
@@ -453,8 +564,8 @@ else:
                 fig.update_layout(
                     template="plotly_dark",
                     height=400,
-                    plot_bgcolor="#121212",
-                    paper_bgcolor="#121212",
+                    plot_bgcolor="#0A0A0A",
+                    paper_bgcolor="#0A0A0A",
                     font_color="#E0E0E0"
                 )
                 st.plotly_chart(fig, use_container_width=True)
@@ -474,7 +585,7 @@ else:
         
         if error:
             st.error(f"Failed to fetch trades: {error}")
-            st.markdown("**Debug Info**: Check Supabase configuration (tables: `trade_logs`, `journals`) or Render logs for API errors.")
+            st.markdown("**Debug Info**: Check Supabase `trade_logs` table schema or Render logs for API errors.")
         elif data:
             trades_df = pd.DataFrame(data.get("trades", []))
             if not trades_df.empty:
@@ -488,7 +599,7 @@ else:
                     "vega": "{:.2f}"
                 }))
             else:
-                st.info("No trades found. Check Supabase configuration or place trades via the Strategy Suggestions tab.")
+                st.info("No trades found. Place trades via the Strategy Suggestions tab or verify Supabase configuration.")
 
     # --- Journal Tab ---
     elif selected == "Journal":
