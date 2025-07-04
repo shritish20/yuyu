@@ -172,8 +172,8 @@ else:
     with st.sidebar:
         selected = option_menu(
             "Navigation",
-            ["Dashboard", "Strategy Suggestions", "Risk Evaluation", "Option Chain", "Trade Log", "Journal"],
-            icons=["speedometer2", "lightbulb", "shield-check", "table", "book", "journal-text"],
+            ["Live Dashboard", "Market Dashboard", "Strategy Suggestions", "Risk Evaluation", "Option Chain", "Trade Log", "Journal"],
+            icons=["speedometer2", "graph-up", "lightbulb", "shield-check", "table", "book", "journal-text"],
             menu_icon="rocket",
             default_index=0,
             styles={
@@ -184,9 +184,82 @@ else:
             }
         )
 
-    # --- Dashboard Tab ---
-    if selected == "Dashboard":
-        st.header("Option Seller Dashboard")
+    # --- Live Dashboard Tab ---
+    if selected == "Live Dashboard":
+        st.header("Live Dashboard")
+        if st.button("🔄 Refresh Live Dashboard"):
+            st.rerun()
+        data, error = api_request("/live/dashboard")
+        
+        if error:
+            st.error(error)
+        elif data:
+            st.subheader("Portfolio Summary")
+            portfolio = data.get("portfolio", {})
+            col1, col2, col3 = st.columns(3)
+            with col1:
+                st.markdown("<div class='metric-card'>", unsafe_allow_html=True)
+                st.metric("Total Funds", f"₹{portfolio.get('total_funds', 0):.2f}")
+                st.metric("Capital Deployed", f"₹{portfolio.get('capital_deployed', 0):.2f}")
+                st.markdown("</div>", unsafe_allow_html=True)
+            with col2:
+                st.markdown("<div class='metric-card'>", unsafe_allow_html=True)
+                st.metric("Exposure", f"{portfolio.get('exposure_percent', 0):.2f}%")
+                st.metric("Total P&L", f"₹{portfolio.get('total_pnl', 0):.2f}")
+                st.markdown("</div>", unsafe_allow_html=True)
+            with col3:
+                st.markdown("<div class='metric-card'>", unsafe_allow_html=True)
+                st.metric("Total Vega", f"{portfolio.get('total_vega', 0):.2f}")
+                st.metric("Total Theta", f"{portfolio.get('total_theta', 0):.2f}")
+                st.markdown("</div>", unsafe_allow_html=True)
+            
+            st.subheader("Current Positions")
+            positions_df = pd.DataFrame(data.get("positions", []))
+            if not positions_df.empty:
+                st.dataframe(positions_df.style.format({
+                    "entry_price": "₹{:.2f}",
+                    "current_price": "₹{:.2f}",
+                    "quantity": "{:.0f}",
+                    "realized_pnl": "₹{:.2f}",
+                    "unrealized_pnl": "₹{:.2f}",
+                    "vega": "{:.2f}",
+                    "theta": "{:.2f}"
+                }))
+                # P&L Visualization
+                fig = go.Figure(data=[
+                    go.Bar(name="Realized P&L", x=positions_df.get("strategy", positions_df.get("instrument_key", [])), y=positions_df["realized_pnl"], marker_color='#00FF00'),
+                    go.Bar(name="Unrealized P&L", x=positions_df.get("strategy", positions_df.get("instrument_key", [])), y=positions_df["unrealized_pnl"], marker_color='#00CC00')
+                ])
+                fig.update_layout(
+                    title="P&L by Position",
+                    barmode="group",
+                    template="plotly_dark",
+                    height=400,
+                    plot_bgcolor="#121212",
+                    paper_bgcolor="#121212",
+                    font_color="#E0E0E0"
+                )
+                st.plotly_chart(fig, use_container_width=True)
+            else:
+                st.info("No current positions found.")
+            
+            st.subheader("Market Snapshot")
+            market_data = data.get("market_data", {})
+            col4, col5 = st.columns(2)
+            with col4:
+                st.markdown("<div class='metric-card'>", unsafe_allow_html=True)
+                st.metric("Nifty Spot", f"₹{market_data.get('nifty_spot', 0):.2f}")
+                st.metric("India VIX", f"{market_data.get('india_vix', 0):.2f}")
+                st.markdown("</div>", unsafe_allow_html=True)
+            with col5:
+                st.markdown("<div class='metric-card'>", unsafe_allow_html=True)
+                st.metric("ATM IV", f"{market_data.get('avg_iv', 0):.2f}%")
+                st.metric("Straddle Price", f"₹{market_data.get('straddle_price', 0):.2f}")
+                st.markdown("</div>", unsafe_allow_html=True)
+
+    # --- Market Dashboard Tab ---
+    elif selected == "Market Dashboard":
+        st.header("Market Dashboard")
         data, error = api_request("/option-seller-dashboard")
         
         if error:
@@ -219,7 +292,7 @@ else:
                 st.metric("GARCH 7-Day", f"{data.get('garch_7_day', 0):.2f}%")
                 st.markdown("</div>", unsafe_allow_html=True)
             
-            st.markdown("### Market Metrics")
+            st.subheader("Market Metrics")
             col4, col5 = st.columns(2)
             with col4:
                 st.markdown("<div class='metric-card'>", unsafe_allow_html=True)
@@ -281,7 +354,7 @@ else:
                         # Execute Strategy Button
                         if st.button(f"Execute {strategy}", key=f"execute_{strategy}"):
                             execute_data = {
-                                "orders": details.get("orders", []),
+                                "legs": details.get("orders", []),  # Fixed: Changed "orders" to "legs"
                                 "strategy": strategy
                             }
                             execute_response, execute_error = api_request(
@@ -297,7 +370,7 @@ else:
     # --- Risk Evaluation Tab ---
     elif selected == "Risk Evaluation":
         st.header("Portfolio Risk Evaluation")
-        active_trades = []  # Fetch real positions from Upstox if available
+        active_trades = []  # Fetch real positions if available
         data, error = api_request(
             "/evaluate/risk",
             method="POST",
@@ -401,6 +474,7 @@ else:
         
         if error:
             st.error(f"Failed to fetch trades: {error}")
+            st.markdown("**Debug Info**: Check Supabase configuration (tables: `trade_logs`, `journals`) or Render logs for API errors.")
         elif data:
             trades_df = pd.DataFrame(data.get("trades", []))
             if not trades_df.empty:
@@ -414,7 +488,7 @@ else:
                     "vega": "{:.2f}"
                 }))
             else:
-                st.info("No trades found. Check Supabase configuration or place trades to populate the log.")
+                st.info("No trades found. Check Supabase configuration or place trades via the Strategy Suggestions tab.")
 
     # --- Journal Tab ---
     elif selected == "Journal":
@@ -434,6 +508,7 @@ else:
                     data, error = api_request("/log/journal", method="POST", json_data=journal_data)
                     if error:
                         st.error(f"Failed to save journal: {error}")
+                        st.markdown("**Debug Info**: Verify Supabase `journals` table schema and API logs on Render.")
                     else:
                         st.success("✅ Journal entry saved successfully!")
                         st.rerun()
@@ -441,6 +516,7 @@ else:
         data, error = api_request("/fetch/journals")
         if error:
             st.error(f"Failed to fetch journals: {error}")
+            st.markdown("**Debug Info**: Check Supabase configuration or Render logs for API errors.")
         elif data:
             journals_df = pd.DataFrame(data.get("journals", []))
             if not journals_df.empty:
